@@ -19,8 +19,8 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync --locked
-uv run molecular-compiler demo --training-steps 10
-uv run molecular-compiler benchmark --sizes 8 32 128 --repeats 10
+uv run molc demo --training-steps 10
+uv run molc benchmark --sizes 8 32 128 --repeats 10
 uv run pytest -q
 ```
 
@@ -42,8 +42,8 @@ see [docs/phase0.md](docs/phase0.md)):
 
 ```sh
 uv sync --locked --extra phase0 --extra embeddings
-uv run molecular-compiler worm-ingest --checkpoint-hash <esm2 sha256> --device mps
-uv run molecular-compiler phase0-run   # Stage A is already frozen in configs/
+uv run molc worm-ingest --checkpoint-hash <esm2 sha256> --device mps
+uv run molc phase0-run   # Stage A is already frozen in configs/
 ```
 
 ESM-2 weights are loaded only when `esm2_embedder` is explicitly invoked.
@@ -108,15 +108,15 @@ fixtures create their own clearly labeled register.
 A complete file-based workflow can be exercised without animal data:
 
 ```sh
-uv run molecular-compiler export-fixture artifacts/input
-uv run molecular-compiler rank artifacts/input
+uv run molc export-fixture artifacts/input
+uv run molc rank artifacts/input
 ```
 
 Copy `configs/worm.yaml`, set `input_directory: artifacts/input` and
 `output_directory: artifacts/run`, then run:
 
 ```sh
-uv run molecular-compiler run your-config.yaml
+uv run molc run your-config.yaml
 ```
 
 YAML is validated against a strict JSON Schema. Recordings use Zarr with units

@@ -2,7 +2,7 @@
 
 *Engineering specification for the system described in "A Molecular Compiler for Whole-Brain Emulation." The framework document explains why each design choice is made; this document specifies what to build.*
 
-*Revision 8 (2026-10-06): records the Phase 0 run on public worm data and the design changes its kill criteria force (Section 10.2). Peptidergic heads leave the Phase 1 critical path; sign is treated as unidentified without chloride data; the K4 contrast diagnostic is defined on standardized columns; the protein-language-model decision is reopened; the worm M8 backend is in-house; Stage B fixes the architecture, budget and metric targets. Phase 1 has not started. See [Revision history](#14-revision-history).*
+*Revision 9 (2026-10-06): starts Phase 1 on C. elegans with the full compiled model on the frozen Phase 0 comparison (Section 10.3), and records its resolution, kinetics, unit, chloride and training choices with their deviations. Revision 8 recorded the Phase 0 outcome (Section 10.2). See [Revision history](#14-revision-history).*
 
 ---
 
@@ -913,6 +913,23 @@ Every response model in Phase 0 is a steady-state linear-response approximation 
 
 The Phase 1 full model adds kinetic and observation parameters. Those are outside the M4 budget (M4-R1), but they must be reported alongside it.
 
+### 10.3 Phase 1 on C. elegans (Revision 9)
+
+Phase 1 runs the compiled and simulated model (M4–M9) on the frozen Phase 0 comparison: the same atlas targets, folds, labels, noise ceilings, Stage B budget and refit baselines (`docs/phase1.md`). Results are restricted and kept local. This section records the choices made before any fold was scored.
+
+| Choice | Value | Status |
+|---|---|---|
+| Resolution | $n_{\text{comp}} = 1$, $\Delta t = 10$ ms, float64 | **Deviation from Section 12.6.** The $\Delta t$ check compared simulated responses, not metrics against the noise ceiling: against 5 ms, the worst relative error over responding pairs was 12% at 10 ms and 134% at 20 ms. $n_{\text{comp}}$ was not tested, because the connectome carries no synapse positions (a Phase 0 declared approximation), so extra compartments add no information. In float32 the voltage solve fails its residual tolerance at coarse $\Delta t$ |
+| Gating | Generic HH with one activation gate and an optional inactivation gate (M5) | Added in Revision 9. Without inactivation, T-type and P/Q-type Ca²⁺ channels stay open at rest and the network rests near −25 mV |
+| Kinetic priors | Curated family records (M5-R1, Section 10.2) from C. elegans channel models and receptor recordings. Families without a worm measurement get 16× covariance | M5 |
+| Connectome units | Policy constants convert EM section counts to conductance: 0.01 nS per chemical section and 0.05 nS per gap section | New `ResolutionPolicy.synapse_unit_nS` and `gap_unit_nS`. The network is stationary below about 0.015 nS per chemical section and non-stationary at 0.02 |
+| Chloride | Basal $[\text{Cl}^-]_i = 5$ mM, the lower bound of the prior | Unmeasured. This is the K3 condition ($<9$ mM) chosen, not fitted, so sign results remain conditional on it |
+| Observation | $F = 0.1 + \text{Hill}(\text{Ca})$, with half-saturation equal to the initial model's median resting calcium | Calcium units are arbitrary, and the value is fixed from the model alone |
+| Gauge | The Phase 0 drive gauge on each simulated column, with one global gain | Section 6.3 |
+| Training | Perturbation loss only, AdamW, 30 steps of 4-column batches per fold | **Deviation from Sections 6.1 and 6.4.** On CPU, one 50 s simulated stimulation costs about 2 s forward and 10–20× that for a reverse-mode gradient. The full curriculum, ensembles and trajectory and statistic losses are not run |
+
+A pass under these deviations supports the full-model claim only for the perturbation pathway at this resolution. A failure does not separate a molecular-rule failure from under-training. Section 11 requires the M10 residual analysis either way.
+
 ## 11. Risks and Mitigations
 
 | Risk | Signal | Mitigation |
@@ -1121,4 +1138,5 @@ See the framework document for the full scientific reference list.
 | 5 | 2026-10-06 | Related work survey added (§1.5), with a list of what this spec does that existing projects do not. **Jaxley** adopted as the backend for M5 mechanisms and M7 full-model runs, and as the numerical reference for M8 (`S-R4`, §7.3). **Baselines:** B5 (Creamer et al.) reimplemented in Phase 0; B6 run from `flyvis`; fly-scale B0 run from the Shiu et al. code. **M13:** BAAIWorm body as the first worm adapter candidate, evaluation only. **M1-R6:** worm ingestion cross-checked against c302. **References:** Bernaerts et al. 2025, Gleeson et al. 2018, Golinelli et al. 2025, Zanichelli et al. 2025 added; Jaxley title confirmed; Zhao et al. 2024 DOI added. |
 | 6 | 2026-10-06 | **M8 backend:** Jaxley's limits checked against its 0.14.0 source and listed (`S-R4`): no gap junctions, no cross-neuron coupling in the implicit solve, no surrogate switching, field coupling or `event`/`parallel` modes. The worm M8 backend is no longer fixed as in-house; it is decided by a Phase 0 trial with five pass conditions (§7.3, §10). Fly-scale M8 stays in-house. |
 | 7 | 2026-10-06 | Bounded reference-software exit added (§1.6, §10), preserving scientific phase exits. M4-R1 now uses an explicit absolute capacity budget: input rank is a collinearity diagnostic, not a nonlinear parameter-count bound. Reference morphology and hybrid surrogate execution are declared approximations. Event release semantics and experimental waveform-parallel mode are specified honestly. Peptide receptors keep independent kinetics, grid boundaries are explicit, FFT grid complexity is corrected, metric normalizations require evidence, and bootstrap clusters respect canonical classes and repeated conditions. Jaxley capability failure can select the in-house backend before an unsupported full-network trial. |
+| 9 | 2026-10-06 | Phase 1 started on C. elegans (§10.3). M5 generic HH gains an optional inactivation gate. `ResolutionPolicy` gains connectome unit conversions. Phase 1 resolution, chloride, observation and training choices recorded with their deviations from §6 and §12.6. |
 | 8 | 2026-10-06 | Phase 0 run on public worm data (§10.2). **K2:** peptidergic heads leave the Phase 1 critical path (§6.4). **K3:** failed; sign is reported by stability and K3 experiments lead M11. **K4:** contrast participation ratio defined on standardized columns (§4.6). **§12.1:** reopened; kinetic priors use curated family labels before PLM neighbors. **S-R4:** worm M8 backend is in-house. **Stage B** frozen: compact $k=2$ tied heads, 13-parameter budget, metric targets. B0 matching the linear-response compiler is recorded as a Phase 1 risk. |

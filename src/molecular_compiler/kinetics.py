@@ -67,6 +67,12 @@ class KineticRecord:
     gate_powers: tuple = ()
     transport_equilibrium_mM: dict = field(default_factory=dict)
     transporter_current_pA: float = 0.0
+    # Optional first-order inactivation gate for the generic HH form:
+    # h_inf = 1 / (1 + exp((V - h_v_half) / h_slope)), open = m^m_power * h.
+    h_v_half_mV: float | None = None
+    h_slope_mV: float = 5.0
+    h_tau_s: float = 0.1
+    m_power: int = 1
 
     def __post_init__(self):
         if self.model_form not in {
@@ -123,6 +129,14 @@ class KineticRecord:
                 raise ValueError("invalid Markov open-state index")
         if self.gate_powers and len(self.gate_powers) != self.state_size:
             raise ValueError("gate powers must match channel state size")
+        if self.h_v_half_mV is not None and (
+            self.model_form != "HH"
+            or self.mechanism is not None
+            or self.h_slope_mV <= 0
+            or self.h_tau_s <= 0
+            or self.m_power < 1
+        ):
+            raise ValueError("inactivation gate requires generic HH kinetics")
         if self.params is not None and len(self.params) != mean.size:
             raise ValueError("kinetic parameter dimensions differ from prior")
 
@@ -145,7 +159,12 @@ class KineticRecord:
     def state_size(self):
         if self.model_form == "markov":
             return len(self.transition_generator)
-        return len(self.mechanism.channel_states) if self.mechanism is not None else 1
+        if self.mechanism is not None:
+            return len(self.mechanism.channel_states)
+        return 1 if self.h_v_half_mV is None else 2
+
+    def _h_steady(self, voltage):
+        return jax.nn.sigmoid(-(voltage - self.h_v_half_mV) / self.h_slope_mV)
 
     def initial_gates(self, voltage, width):
         if self.state_size > width:
@@ -166,7 +185,10 @@ class KineticRecord:
             (voltage - self.parameter("v_half_mV", self.v_half_mV))
             / self.parameter("slope_mV", self.slope_mV)
         )
-        return result.at[..., 0].set(steady)
+        result = result.at[..., 0].set(steady)
+        if self.h_v_half_mV is not None:
+            result = result.at[..., 1].set(self._h_steady(voltage))
+        return result
 
     def step_gates(self, voltage, old, dt_s, temperature_C):
         if self.model_form == "markov":
@@ -193,12 +215,23 @@ class KineticRecord:
             for index, key in enumerate(keys):
                 old = old.at[..., index].set(updated[key])
             return old
-        return old.at[..., 0].set(self.gate(voltage, old[..., 0], dt_s, temperature_C))
+        new = old.at[..., 0].set(self.gate(voltage, old[..., 0], dt_s, temperature_C))
+        if self.h_v_half_mV is not None:
+            tau = self.h_tau_s / self.parameter("q10", self.q10) ** (
+                (temperature_C - self.temperature_C) / 10
+            )
+            new = new.at[..., 1].set(
+                rush_larsen(old[..., 1], self._h_steady(voltage), tau, dt_s)
+            )
+        return new
 
     def open_probability(self, gates):
         if self.model_form == "markov":
             return gates[..., jnp.array(self.open_states)].sum(axis=-1)
-        powers = jnp.asarray(self.gate_powers or (1.0,) * self.state_size)
+        default = (1.0,) * self.state_size
+        if self.mechanism is None and self.h_v_half_mV is not None:
+            default = (float(self.m_power), 1.0)
+        powers = jnp.asarray(self.gate_powers or default)
         return jnp.prod(gates[..., : self.state_size] ** powers, axis=-1)
 
     def gate(self, voltage, old, dt_s, temperature_C):
@@ -223,6 +256,11 @@ class KineticsLibrary:
     records: dict
     temperature_C: float = 20
     metadata: dict | None = None
+    gene_families: dict = field(default_factory=dict)
+
+    def family_for(self, gene_id, default):
+        """Curated family label when assigned (spec 10.2), else the default."""
+        return self.gene_families.get(gene_id, default)
 
     def ensure(self, gene_id, embedding, family=None):
         if gene_id in self.records:

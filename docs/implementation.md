@@ -106,8 +106,8 @@ uv sync --locked --extra nwb
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest -q
-uv run molecular-compiler demo --training-steps 10
-uv run molecular-compiler benchmark --sizes 8 32 128 --repeats 10
+uv run molc demo --training-steps 10
+uv run molc benchmark --sizes 8 32 128 --repeats 10
 ```
 
 The benchmark warms and synchronizes JAX calls, keeps numerical inputs dynamic,

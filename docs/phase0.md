@@ -8,17 +8,17 @@ derived report inherits that tier and stays local, in `artifacts/phase0/`.
 
 1. **Register sources.** `data-register.json` lists every input with source,
    version, license and tier. Ingestion refuses unregistered data (M1-R5).
-2. **Ingest.** `molecular-compiler worm-ingest --checkpoint-hash <sha256> --device mps`
+2. **Ingest.** `molc worm-ingest --checkpoint-hash <sha256> --device mps`
    converts the cached sources into canonical Parquet tables under `data/worm/`
    (gitignored). It writes an ingestion report with source hashes, the c302
    cross-check (M1-R6), gene counts, dropped peptide pairs and every declared
    approximation.
-3. **Freeze Stage A.** `molecular-compiler phase0-register` writes
+3. **Freeze Stage A.** `molc phase0-register` writes
    `configs/phase0-stage-a.json` with exclusive create. It holds the 118-class
    partition, the leave-class-out and leave-neuron-out folds, the K1–K4
    thresholds, metric and ceiling definitions, and the Stage B selection rules.
    It was committed before any analysis read the response atlas.
-4. **Run.** `molecular-compiler phase0-run` executes every analysis against the
+4. **Run.** `molc phase0-run` executes every analysis against the
    frozen Stage A. It writes `artifacts/phase0/phase0-report.{json,md}` and
    `exploratory.json`, then freezes `configs/phase0-stage-b.json`
    (architecture, absolute parameter budget and metric targets).

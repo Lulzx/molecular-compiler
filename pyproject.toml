@@ -36,7 +36,7 @@ embeddings = [
 ]
 
 [project.scripts]
-molecular-compiler = "molecular_compiler.__main__:main"
+molc = "molecular_compiler.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]

@@ -19,7 +19,7 @@ from .storage import load_checkpoint, save_simgraph, write_recording
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="molecular-compiler")
+    parser = argparse.ArgumentParser(prog="molc")
     sub = parser.add_subparsers(dest="command", required=True)
     demo = sub.add_parser("demo", help="synthetic pipeline and gradient training")
     demo.add_argument("--output", default="artifacts/demo")
@@ -60,6 +60,18 @@ def main():
     phase0.add_argument("--output", default="artifacts/phase0")
     phase0.add_argument("--steps", type=int, default=1500)
     phase0.add_argument("--stage-b", default="configs/phase0-stage-b.json")
+    fold = sub.add_parser("phase1-fold", help="train the full compiler on one fold")
+    fold.add_argument("--project", default="data/worm")
+    fold.add_argument("--registration", default="configs/phase0-stage-a.json")
+    fold.add_argument("--output", default="artifacts/phase1")
+    fold.add_argument("--split", default="leave_class_out")
+    fold.add_argument("--fold", type=int, required=True)
+    fold.add_argument("--steps", type=int, default=40)
+    fold.add_argument("--batch", type=int, default=4)
+    phase1 = sub.add_parser("phase1-report", help="pool Phase 1 folds vs baselines")
+    phase1.add_argument("--project", default="data/worm")
+    phase1.add_argument("--registration", default="configs/phase0-stage-a.json")
+    phase1.add_argument("--output", default="artifacts/phase1")
     phase0.add_argument(
         "--ripoll",
         default="data/cache/cect/cect/data/"
@@ -102,6 +114,37 @@ def main():
             "path": args.output,
             "processing_hash": freeze_registration(args.output, stage_a(manifest)),
         }
+    elif args.command == "phase1-fold":
+        from .phase0 import load_registration
+        from .phase1_worm import run_fold
+
+        result = run_fold(
+            args.project,
+            load_registration(args.registration),
+            args.split,
+            args.fold,
+            args.output,
+            args.steps,
+            args.batch,
+        )
+        print(json.dumps({k: result[k] for k in ("split", "fold", "wall_seconds")}))
+    elif args.command == "phase1-report":
+        from .phase0 import load_registration
+        from .phase1_worm import report as phase1_report
+
+        result = phase1_report(
+            args.project, load_registration(args.registration), args.output
+        )
+        print(
+            json.dumps(
+                {
+                    split: value.get("acceptance", value)
+                    for split, value in result["splits"].items()
+                },
+                indent=2,
+                default=str,
+            )
+        )
     elif args.command == "phase0-run":
         from .phase0 import freeze_registration, load_registration
         from .phase0_worm import exploratory, render_report

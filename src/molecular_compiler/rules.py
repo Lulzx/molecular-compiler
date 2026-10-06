@@ -109,10 +109,32 @@ class RuleNetwork:
             frozen_params=base.params,
         )
 
+    @classmethod
+    def initialize_partial(cls, frozen, trainable, budget, ortholog_groups=()):
+        """Frozen basis with a named trainable subset under an absolute budget."""
+        count = sum(int(np.size(v)) for v in trainable.values())
+        if not isinstance(budget, int) or count > budget:
+            raise ValueError(f"{count} parameters exceed frozen budget {budget}")
+        if not set(trainable) <= set(frozen):
+            raise ValueError("trainable entries must name frozen-basis entries")
+        frozen = {k: jnp.asarray(v) for k, v in frozen.items()}
+        for name, value in trainable.items():
+            if np.shape(value) != frozen[name].shape:
+                raise ValueError(f"{name}: trainable shape differs from basis")
+        return cls(
+            {k: jnp.asarray(v) for k, v in trainable.items()},
+            budget=budget,
+            ortholog_groups=tuple(ortholog_groups),
+            frozen_params=frozen,
+        )
+
     @property
     def weights(self):
         if self.frozen_params is None:
             return self.params
+        if "scale" not in self.params:
+            # Partially frozen network: trainable entries override frozen ones.
+            return {**self.frozen_params, **self.params}
         return {
             name: (
                 self.params["bias"]

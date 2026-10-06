@@ -7,3 +7,4 @@ artifacts/
 dist/
 data/cache/
 data/worm/
+.DS_Store

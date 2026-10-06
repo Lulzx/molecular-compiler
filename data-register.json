@@ -98,5 +98,25 @@
     "license": "MIT",
     "tier": "open",
     "attribution": "Lin Z et al. (2023) Evolutionary-scale prediction of atomic-level protein structure with a language model. Science 379:1123-1130"
+  },
+  {
+    "dataset_id": "randi2023_traces",
+    "species": "C. elegans",
+    "animal_id": "randi2023_population",
+    "source": "Randi et al. 2023 OSF 10.17605/OSF.IO/E2SYT: exported_data.tar.gz (sha256 d6e7b3d93175b40b7ae17bde2182835e9c2144388142c522ee9be3832f6ce836) and exported_data_unc31.tar.gz (sha256 8b99f6610dbb2d6ab0b8dd6ad15646fe1c120da25dd9bb725f36f530b2af321a)",
+    "version": "OSF e2syt exported_data",
+    "license": "CC BY 4.0 (article, Nature 623:406); OSF node sets no separate data license",
+    "tier": "open",
+    "attribution": "Randi F, Sharma AK, Dvali S, Leifer AM (2023) Neural signal propagation atlas of Caenorhabditis elegans. Nature 623:406-414"
+  },
+  {
+    "dataset_id": "phase1_kinetics_curation",
+    "species": "C. elegans",
+    "animal_id": "literature",
+    "source": "Phase 1 literature curation: Nicoletti et al. 2019 PLoS ONE 14:e0218738 and 2024 PLoS ONE 19:e0298105 (channels, passive properties); receptor and chloride sources cited per family in worm_kinetics.CURATED_FAMILIES. Quote file data/cache/kinetics_curation.json (sha256 3d3c8ac00c43eaa49c61b1ebfe7366a72a9a2308a0ad99992cc6c94e04d9355d)",
+    "version": "phase1-2026-10-06",
+    "license": "Mixed: Nicoletti papers CC BY 4.0; other sources under publisher copyright (numeric values used as facts, quotes kept local)",
+    "tier": "restricted",
+    "attribution": "See per-family source strings in worm_kinetics.CURATED_FAMILIES"
   }
 ]

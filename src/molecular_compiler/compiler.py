@@ -28,6 +28,10 @@ class ResolutionPolicy:
     leak_nS: float = 0.02
     leak_reversal_mV: float = -60.0
     axial_nS: float = 0.1
+    # Conductance per unit of connectome size (synapse size, gap contact area).
+    # 1.0 keeps sizes as given; EM section counts need an explicit conversion.
+    synapse_unit_nS: float = 1.0
+    gap_unit_nS: float = 1.0
     length_constant_um: float = 100.0
     chloride_prior_mM: tuple = (5.0, 40.0)
     rest_voltage_range_mV: tuple = (-65.0, -35.0)
@@ -55,6 +59,8 @@ class ResolutionPolicy:
             raise ValueError("resolution must yield a positive definite voltage system")
         if (
             self.axial_nS < 0
+            or self.synapse_unit_nS <= 0
+            or self.gap_unit_nS <= 0
             or self.length_constant_um <= 0
             or self.solve_tolerance <= 0
             or self.max_cg_iterations < 1
@@ -202,7 +208,7 @@ def _compile(
         return kinetics.ensure(
             genes[i]["gene_id"],
             np.asarray(genes[i]["plm_embedding"]),
-            genes[i]["molecule_class"],
+            kinetics.family_for(genes[i]["gene_id"], genes[i]["molecule_class"]),
         )
 
     # Structural presence is known before entering the differentiable program.
@@ -318,7 +324,12 @@ def _compile(
         jnp.asarray(ligand_mask),
     )
     confidence = jnp.asarray([r["detection_confidence"] for r in syn])
-    gate = jnp.asarray([r["size"] for r in syn]) * confidence * attenuation
+    gate = (
+        jnp.asarray([r["size"] for r in syn])
+        * policy.synapse_unit_nS
+        * confidence
+        * attenuation
+    )
     contacts = [
         r
         for r in graph.connectome.contacts.to_pylist()
@@ -334,7 +345,11 @@ def _compile(
     gap_j = jnp.array([id_index[r["j_id"]] for r in contacts], dtype=jnp.int32)
     innexin_mask = jnp.any(expressed[:, classes.get("innexin", [])], axis=1)
     gap_g = rules.gap_conductance(
-        z, gap_i, gap_j, jnp.array([r["area"] for r in contacts]), innexin_mask
+        z,
+        gap_i,
+        gap_j,
+        jnp.array([r["area"] for r in contacts]) * policy.gap_unit_nS,
+        innexin_mask,
     )
     # M6-R3: audit driving-force intervals; no sign enters simulator parameters.
     audit_low, audit_high = [], []
