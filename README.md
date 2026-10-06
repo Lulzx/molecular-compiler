@@ -115,7 +115,7 @@ and the result that would reopen it:
 
 ## Status
 
-Specification only (revision 5). See [spec.md](spec.md) for modules, data
+Specification only (revision 6). See [spec.md](spec.md) for modules, data
 schemas, training, evaluation, phases and references.
 
 ## License
