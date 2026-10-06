@@ -1,6 +1,6 @@
 # Implementation and acceptance status
 
-This repository implements an executable reference system for revision 7 of
+This repository implements an executable reference system for revision 8 of
 `spec.md`. Software tests and synthetic demonstrations establish numerical and
 API behavior and satisfy the initial reference-software scope in Section 1.6.
 They do not establish the scientific exits in Section 10.
@@ -57,28 +57,18 @@ are tested. NWB tests skip only when the optional dependency is absent.
 
 ## Phase 0 and scientific gates
 
-The repository data register contains no animal datasets. The synthetic project
-reports rank, noise assumptions and processing hashes as fixtures only. Before
-Phase 1 can be accepted, the following evidence is still required:
+Phase 0 has been run on public worm data. The procedure is in [phase0.md](phase0.md), and the resulting design changes are in spec Section 10.2 (Revision 8). The numerical report inherits the `restricted` tier of its CeNGEN, Cook, Beets and WormBase inputs, so it stays local in `artifacts/phase0/`.
 
-1. Register and ingest open CeNGEN/NeuroPAL, Cook/c302, Randi perturbation and
-   Beets ligand/receptor sources, with versions and confirmed licensing.
-2. Pre-register class partitions, split definitions, K1–K4 thresholds and metric
-   targets; complete the real gain/opsin gauge audit before freezing capacity.
-3. Validate ESM-2 family recovery at the specified 90% threshold on curated
-   kinetics; obtain/check molecule priors and full-model coverage.
-4. Run the Jaxley capability audit before a whole-worm trial. The supplied
-   single-cell comparison verifies the differentiable bridge. Capability flags
-   default to false; unsupported coupling/switching selects the in-house backend.
-   A full worm performance comparison is required only if capabilities pass.
-5. Check B5 against the published atlas result. Its constrained linear fit is
-   a runnable reference, not a completed literature reproduction.
-6. Train independent ensemble members through the specified curriculum and
-   verify window and timestep/compartment convergence on real noise ceilings.
-7. Evaluate B0/B1/B2/B4/B5 on both held-out neurons and whole classes, including
-   all prescribed perturbation metrics, state conditions and residual analysis.
-8. Check ensemble coverage including observation noise; fit the Laplace
-   fallback and repeat coverage if necessary.
+Status of the eight Phase 0 items:
+
+1. **Sources.** Done. The data register holds CeNGEN, Cook 2019 (with the c302 cross-check), Randi wild-type and unc-31, Beets, Fenyves, Ripoll-Sánchez, WormBase, UniProt and ESM-2, each with a measured hash and license.
+2. **Pre-registration.** Done. Stage A (class partition, splits, K1–K4 thresholds and rules) was frozen and committed before the analysis ran. Stage B (architecture, budget and metric targets) was derived from the Stage A rules. The gauge audit uses proxies: rab-3 promoter expression for indicator gain, and autoresponses for opsin drive.
+3. **ESM-2 family recovery.** Run; it fails on nomenclature families. No curated kinetics library exists yet, and molecule priors still need measured sources.
+4. **Jaxley.** Capability audit done; the in-house backend is selected. The single-cell trajectory and gradient comparison passes.
+5. **B5.** Reimplemented as an anatomy-constrained linear response and compared qualitatively with Creamer et al. The published held-out-animal split cannot be reproduced from the pooled atlas.
+6. **Not done.** Ensemble training through the curriculum and the window and timestep/compartment convergence tests are Phase 1. They need raw whole-brain traces and a kinetics library.
+7. **Partly done.** B0/B1/B2/B4/B5 were evaluated on held-out neurons and classes for detection, sign and amplitude, using the linear-response approximation. State conditions, latency and residual analysis need traces.
+8. **Not done.** Ensemble coverage and the Laplace fallback are Phase 1.
 
 M4-R1 now separates input rank diagnostics from nonlinear model capacity.
 Phase 0 freezes an absolute parameter budget after the gauge audit and held-out

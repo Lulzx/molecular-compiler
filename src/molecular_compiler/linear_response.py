@@ -123,6 +123,7 @@ class Model:
     per_gene: bool = False
     hidden: int = 32
     ridge: float = 1e-3
+    learning_rate: float = 0.02
 
 
 def init(model, inputs, seed=0):
@@ -210,14 +211,20 @@ def predict(model, params, inputs, autoresponse):
     return _effective_response(w, autoresponse, jnp.exp(params["log_gain"]))
 
 
-def fit(model, inputs, target, weights, autoresponse, steps=1500, seed=0, lr=0.02):
-    """Weighted least squares on observed off-diagonal training pairs."""
+def fit(model, inputs, target, weights, autoresponse, steps=1500, seed=0, lr=None):
+    """Weighted least squares on observed off-diagonal training pairs.
+
+    AdamW with gradient clipping and a cosine learning-rate decay to zero.
+    """
     params = init(model, inputs, seed)
     target = jnp.asarray(np.nan_to_num(target))
     weights = jnp.asarray(weights)
     autoresponse = jnp.asarray(autoresponse)
     total = jnp.maximum(weights.sum(), 1.0)
-    optimizer = optax.chain(optax.clip_by_global_norm(10.0), optax.adamw(lr, 0.0))
+    schedule = optax.cosine_decay_schedule(lr or model.learning_rate, steps)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(10.0), optax.adamw(schedule, weight_decay=0.0)
+    )
     state = optimizer.init(params)
 
     def loss(p):

@@ -1,0 +1,63 @@
+{
+  "processing_hash": "a3dcd9b8bac80e76c78c49daa1b064c50780ea456dffe7663b77626dd84a80d5",
+  "registration": {
+    "absolute_parameter_budget": 13,
+    "architecture": "compositional_k2",
+    "candidate_parameter_counts": {
+      "compositional_k16": 174,
+      "compositional_k2": 13,
+      "compositional_k32": 598,
+      "compositional_k4": 24,
+      "compositional_k8": 58,
+      "compositional_k8_per_gene": 1218
+    },
+    "candidate_scores": {
+      "compositional_k16": 0.06333842383454337,
+      "compositional_k2": 0.06947771310418616,
+      "compositional_k32": 0.06258188627028285,
+      "compositional_k4": 0.06767521704115914,
+      "compositional_k8": 0.06907075126978414,
+      "compositional_k8_per_gene": 0.06764639161858818
+    },
+    "metric_targets": {
+      "leave_class_out/perturbation_amplitude": {
+        "target": 0.5,
+        "units": "fraction of noise ceiling"
+      },
+      "leave_class_out/perturbation_detection": {
+        "target": 0.7027222075155366,
+        "units": "raw AUROC"
+      },
+      "leave_class_out/perturbation_sign": {
+        "target": 0.976453758969888,
+        "units": "fraction of noise ceiling"
+      },
+      "leave_neuron_out/perturbation_amplitude": {
+        "target": 0.5,
+        "units": "fraction of noise ceiling"
+      },
+      "leave_neuron_out/perturbation_detection": {
+        "target": 0.7079428711208108,
+        "units": "raw AUROC"
+      },
+      "leave_neuron_out/perturbation_sign": {
+        "target": 0.9797297297297297,
+        "units": "fraction of noise ceiling"
+      }
+    },
+    "phase0_report_processing_hash": "c3480fb107fa93d9e590c52967d0be01908bd71604ccae2aa55aa1bc3ac5350a",
+    "rule": {
+      "architecture_and_budget": "among capacity candidates on leave_class_out amplitude correlation, the smallest trainable parameter count within one bootstrap standard error of the best",
+      "metric_targets": "for each metric: best of B0/B1/B2/B5 + 0.05 (normalized where a ceiling exists, raw otherwise), never below 0.5 of the ceiling for amplitude"
+    },
+    "selection_se": {
+      "compositional_k16": 0.002883997922784929,
+      "compositional_k32": 0.00313273087031677,
+      "compositional_k4": 0.0011069397725893746,
+      "compositional_k8": 0.0014614258088526716,
+      "compositional_k8_per_gene": 0.00125321521092815
+    },
+    "stage": "B",
+    "stage_a_hash": "c579ab603d1da671bff64b93b66d37e0ed19b8131567582a6f0ba8cda47f9639"
+  }
+}

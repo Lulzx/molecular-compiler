@@ -2,7 +2,7 @@
 
 *Engineering specification for the system described in "A Molecular Compiler for Whole-Brain Emulation." The framework document explains why each design choice is made; this document specifies what to build.*
 
-*Revision 7 (2026-10-06): adds a bounded reference-software deliverable, separates software conformance from animal-data acceptance, corrects the use of input rank as a parameter-count bound, specifies experimental waveform iteration honestly, and makes numerical, data, surrogate, and scale boundaries explicit. The scientific milestones remain in Section 10. See [Revision history](#14-revision-history).*
+*Revision 8 (2026-10-06): records the Phase 0 run on public worm data and the design changes its kill criteria force (Section 10.2). Peptidergic heads leave the Phase 1 critical path; sign is treated as unidentified without chloride data; the K4 contrast diagnostic is defined on standardized columns; the protein-language-model decision is reopened; the worm M8 backend is in-house; Stage B fixes the architecture, budget and metric targets. Phase 1 has not started. See [Revision history](#14-revision-history).*
 
 ---
 
@@ -338,7 +338,7 @@ Splits are defined once, stored with the dataset, and never changed after Phase 
 **Split diagnostics.** Every `leave_class_out` report also states:
 1. The fraction of genes expressed in held-out classes that are never expressed (above the M4 masking threshold) in any training class.
 2. Whether each held-out class's expression profile lies inside the convex hull of training classes, and its distance to the nearest training class.
-3. The effective number of independent expression contrasts in the training split (participation ratio of the singular values of $X$ restricted to training rows), alongside $\text{rank}_\epsilon(X)$.
+3. The effective number of independent expression contrasts in the training split (participation ratio of the singular values of $X$ restricted to training rows, with each column centered and scaled to unit variance), alongside $\text{rank}_\epsilon(X)$. Without standardization the largest-scale column (synapse size in section counts) and the mean row dominate the spectrum, and the ratio measures units rather than contrasts (Section 10.2).
 
 A held-out class that sits inside the training hull and introduces no new genes tests interpolation, not compositional extrapolation, and is reported as such.
 
@@ -588,8 +588,8 @@ Specified in Section 6.
 **Method.** Approximate expected information gain by ensemble disagreement on the candidate's predicted observable (mutual information between prediction and model identity). Divide by cost to rank. Until the ensemble passes the calibration check of Section 6.5, this score is labeled a **sensitivity proxy**, not an information gain.
 
 **Priority order.** Candidates are ranked first by which Phase 0 failure mode they address, and only then by the disagreement score:
-1. **Peptidergic vs. wired transmission (K2).** Dense-core-vesicle release mutants (e.g., *unc-31*/CAPS), neuropeptide-processing mutants (e.g., *egl-3*, *egl-21*), and knockouts of individual peptides and receptors from `peptide_receptor_pairs`.
-2. **Sign ambiguity (K3).** *kcc-2*, *exp-1*, and glutamate-gated chloride channel mutants that target `sign_ambiguous` edges.
+1. **Sign ambiguity (K3).** *kcc-2*, *exp-1*, and glutamate-gated chloride channel mutants that target `sign_ambiguous` edges, and intracellular chloride measurements. Moved first in Revision 8 because K3 failed in Phase 0 (Section 10.2).
+2. **Peptidergic vs. wired transmission (K2).** Dense-core-vesicle release mutants (e.g., *unc-31*/CAPS), neuropeptide-processing mutants (e.g., *egl-3*, *egl-21*), and knockouts of individual peptides and receptors from `peptide_receptor_pairs`. Kept because the Phase 0 K2 result is conditional on a linear-response approximation.
 3. **Collinearity (K1, K4).** Mutants and drugs that separate collinear gene pairs in $X$.
 4. **ExM panels** that reduce M3 uncertainty on molecules driving the above.
 
@@ -657,7 +657,7 @@ $$
 |---|---|---|---|
 | 0 | In vitro kinetics only | M5 | Verify kinetic models reproduce source data |
 | 1 | Worm, immobilized, spontaneous | M4, M5, M9 | Basic dynamics, short windows |
-| 2 | + perturbation atlas (incl. *unc-31* and peptide-mutant atlases where available) | + $\mathcal{L}_{\text{pert}}$; + peptidergic heads unless Phase 0 K2 eliminated them | Causal structure, wired and peptidergic |
+| 2 | + perturbation atlas (incl. *unc-31* and peptide-mutant atlases where available) | + $\mathcal{L}_{\text{pert}}$; peptidergic heads only as a reported ablation (K2 removed them from the critical path, Section 10.2) | Causal structure |
 | 3 | + long recordings | + $\mathcal{L}_{\text{stat}}$ | Long-horizon statistics |
 | 4 | + multiple internal states | + neuromodulation heads | State dependence |
 | 5 | + second species | + species adapters | Transfer |
@@ -889,6 +889,30 @@ Each criterion has a pre-registered threshold, set before the analysis runs. Fai
 
 ---
 
+### 10.2 Phase 0 outcome (Revision 8)
+
+Phase 0 was run on public worm data (`docs/phase0.md`). Stage A (class partition, splits, thresholds and decision rules) was frozen and committed before any analysis read the response atlas. Several inputs are `restricted`, so numerical results stay in the local, restricted Phase 0 report. This section records only the decisions they force.
+
+Every response model in Phase 0 is a steady-state linear-response approximation of the compiler, with no kinetics or time course. Each conclusion below is conditional on that approximation. Phase 1 repeats the comparisons with the full model.
+
+| Gate | Outcome | Design change |
+|---|---|---|
+| K1 | Pass: $\text{rank}_\epsilon(X)$ exceeds $d_z$ | None |
+| K2 | Peptidergic heads did not improve held-out responses on pairs without a wired connection. The 95% interval for the change was below zero. Silencing the fitted peptide term on *unc-31* animals changed nothing detectable. This agrees with Creamer et al. (2024) | Peptidergic heads leave the Phase 1 critical path (Section 6.4) and remain a reported ablation. The mid-range kernel sensitivity run (Section 12.5) is not required |
+| K3 | Fail: almost every Glu/GABA edge is `sign_ambiguous`. Targets nearly always express an anion-channel receptor, and the chloride prior (5–40 mM) puts $E_{\text{Cl}}$ inside the rest range. Anion synapses are stably inhibitory only if $[\text{Cl}^-]_i$ stays below about 9 mM | Sign metrics are reported only split by stability. K3 mutants and chloride measurements move to the top of M11 (Section 5, M11) |
+| K4 | Interpolation: no held-out class lies inside the training hull, so `leave_class_out` tests extrapolation. Participation ratio: failed as registered, because the unscaled ratio is dominated by the synapse-count column. Standardized, it exceeds the threshold sevenfold | The participation ratio is defined on standardized columns (Section 4.6). This is a definition fix recorded as a design change, not a re-run of the gate |
+| Gauge | Opsin drive, estimated from autoresponses, is not confounded with identity. The indicator-gain proxy, rab-3 promoter expression, correlates with expression principal components (permutation $p \le 0.001$) | Amplitude metrics are flagged in every report (Section 6.3). Phase 1 needs ratiometric or measured indicator gains before amplitude claims |
+| §12.1 PLM check | Fail: leave-one-out nearest-neighbor recovery of nomenclature families is below 90%. Molecule-class recovery is about 99% | M5-R1 assigns kinetic priors from curated family labels (ortholog group or gene family) when available, and uses PLM neighbors only as a fallback. The 90% check is repeated on the curated kinetics library before Phase 1 training |
+| S-R4 | Jaxley fails conditions 1–3 at the interface audit. Its single-cell trajectories and gradients match the in-house loop to float64 precision | The in-house loop is the worm M8 backend for Phase 1 |
+| Baselines | The connectome-only baseline B0 matched or beat the linear-response compiler on detection AUROC, on both held-out neurons and held-out classes. The compiler beat B1 and B2. Anatomy-constrained B5 beat unconstrained B2 | This is the Section 11 signal "molecular rules explain little". Phase 1 must run the M10 residual analysis and the full-model comparison against B0 before any acceptance attempt |
+
+**Stage B** (frozen in `configs/phase0-stage-b.json` by the pre-registered rules) contains:
+- the smallest compact tied-head architecture whose held-out-class performance is within one bootstrap standard error of the best, with PLM projection $k = 2$;
+- its absolute trainable-parameter budget of 13 rule parameters for the linear-response heads;
+- metric targets set at the best of B0/B1/B2/B5 + 0.05.
+
+The Phase 1 full model adds kinetic and observation parameters. Those are outside the M4 budget (M4-R1), but they must be reported alongside it.
+
 ## 11. Risks and Mitigations
 
 | Risk | Signal | Mitigation |
@@ -918,7 +942,7 @@ Every decision listed as open in Revision 3 is made here. Each entry gives the c
 | Decision | Choice | Specified in | Reopen if |
 |---|---|---|---|
 | Numerical framework | Python + JAX (Rev. 3) | §7.3 | — |
-| Protein language model | ESM-2 650M, mean-pooled final layer | §12.1, §4.3 | Phase 0 family-recovery check fails |
+| Protein language model | ESM-2 650M, mean-pooled final layer. **Reopened in Revision 8** (Section 10.2): kept for gene tokens; kinetic priors use curated family labels first | §12.1, §4.3 | Phase 0 family-recovery check fails (it did, on nomenclature families) |
 | Surrogate family | Fixed low-dimensional ODE → small neural ODE → full model, per type | §12.2, M7 | More than 25% of types fall back to the full model |
 | Posterior approximation | Deep ensemble, with per-member Laplace if calibration fails | §12.3, §6.5 | Laplace-augmented ensemble also fails calibration |
 | Voltage solver at fly scale | Matrix-free block-Jacobi PCG in JAX | §12.4, M8 | Iteration or time budget exceeded on the fly benchmark |
@@ -1096,5 +1120,5 @@ See the framework document for the full scientific reference list.
 | 4 | 2026-10-06 | All remaining open decisions made; §12 renamed Design Decisions. **PLM:** ESM-2 650M, mean-pooled final layer, windowed for long sequences (§12.1, §4.3). **Surrogates:** fixed ODE → neural ODE → full model cascade per type (§12.2, M7). **Posterior:** deep ensemble with a coverage-based calibration check and per-member Laplace fallback (§6.5, §12.3). **Fly voltage solve:** matrix-free block-Jacobi PCG with a convergence bound and an additive Schwarz escalation path (§12.4, M8). **Peptidergic kernel:** none for worm, learned decay length for fly and larger (§12.5, M4). **$\Delta t$, $n_{\text{comp}}$:** per-species defaults and convergence test (§12.6, §6.6). **M4 message passing:** fixed at 0 (§12.7). **Data:** data register with three tiers (§12.8, §4.1, M1-R5). |
 | 5 | 2026-10-06 | Related work survey added (§1.5), with a list of what this spec does that existing projects do not. **Jaxley** adopted as the backend for M5 mechanisms and M7 full-model runs, and as the numerical reference for M8 (`S-R4`, §7.3). **Baselines:** B5 (Creamer et al.) reimplemented in Phase 0; B6 run from `flyvis`; fly-scale B0 run from the Shiu et al. code. **M13:** BAAIWorm body as the first worm adapter candidate, evaluation only. **M1-R6:** worm ingestion cross-checked against c302. **References:** Bernaerts et al. 2025, Gleeson et al. 2018, Golinelli et al. 2025, Zanichelli et al. 2025 added; Jaxley title confirmed; Zhao et al. 2024 DOI added. |
 | 6 | 2026-10-06 | **M8 backend:** Jaxley's limits checked against its 0.14.0 source and listed (`S-R4`): no gap junctions, no cross-neuron coupling in the implicit solve, no surrogate switching, field coupling or `event`/`parallel` modes. The worm M8 backend is no longer fixed as in-house; it is decided by a Phase 0 trial with five pass conditions (§7.3, §10). Fly-scale M8 stays in-house. |
-
 | 7 | 2026-10-06 | Bounded reference-software exit added (§1.6, §10), preserving scientific phase exits. M4-R1 now uses an explicit absolute capacity budget: input rank is a collinearity diagnostic, not a nonlinear parameter-count bound. Reference morphology and hybrid surrogate execution are declared approximations. Event release semantics and experimental waveform-parallel mode are specified honestly. Peptide receptors keep independent kinetics, grid boundaries are explicit, FFT grid complexity is corrected, metric normalizations require evidence, and bootstrap clusters respect canonical classes and repeated conditions. Jaxley capability failure can select the in-house backend before an unsupported full-network trial. |
+| 8 | 2026-10-06 | Phase 0 run on public worm data (§10.2). **K2:** peptidergic heads leave the Phase 1 critical path (§6.4). **K3:** failed; sign is reported by stability and K3 experiments lead M11. **K4:** contrast participation ratio defined on standardized columns (§4.6). **§12.1:** reopened; kinetic priors use curated family labels before PLM neighbors. **S-R4:** worm M8 backend is in-house. **Stage B** frozen: compact $k=2$ tied heads, 13-parameter budget, metric targets. B0 matching the linear-response compiler is recorded as a Phase 1 risk. |

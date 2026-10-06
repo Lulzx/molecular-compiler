@@ -785,6 +785,15 @@ def build_worm_project(
         "canonical_classes": {n: canonical_class(n, classes) for n in neurons},
         "gene_names": {g["gene_id"]: g["name"] for g in gene_rows},
         "receptor_polarity": receptor_polarity,
+        "gauge_proxies": {
+            # GCaMP6s and the GUR-3/PRDX-2 QF driver both use the rab-3 promoter.
+            "rab-3": {
+                n: float(
+                    profiles[units.index(cengen_unit(n, classes)), names.index("rab-3")]
+                )
+                for n in neurons
+            }
+        },
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (output / "ingestion-report.json").write_text(json.dumps(report, indent=2))

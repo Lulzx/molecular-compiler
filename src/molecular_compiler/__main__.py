@@ -59,6 +59,7 @@ def main():
     phase0.add_argument("--registration", default="configs/phase0-stage-a.json")
     phase0.add_argument("--output", default="artifacts/phase0")
     phase0.add_argument("--steps", type=int, default=1500)
+    phase0.add_argument("--stage-b", default="configs/phase0-stage-b.json")
     phase0.add_argument(
         "--ripoll",
         default="data/cache/cect/cect/data/"
@@ -102,15 +103,33 @@ def main():
             "processing_hash": freeze_registration(args.output, stage_a(manifest)),
         }
     elif args.command == "phase0-run":
-        from .phase0 import load_registration
+        from .phase0 import freeze_registration, load_registration
+        from .phase0_worm import exploratory, render_report
         from .phase0_worm import run as run_phase0
+        from .worm_public import load_worm_project
 
+        registration = load_registration(args.registration)
         report = run_phase0(
             args.project,
-            load_registration(args.registration),
+            registration,
             args.output,
             steps=args.steps,
             ripoll_csv=args.ripoll,
+        )
+        extra = exploratory(*load_worm_project(args.project), registration)
+        (Path(args.output) / "exploratory.json").write_text(json.dumps(extra, indent=2))
+        (Path(args.output) / "phase0-report.md").write_text(
+            render_report(report, extra)
+        )
+        freeze_registration(
+            args.stage_b,
+            {
+                **report["stage_b"],
+                "stage_a_hash": registration["processing_hash"],
+                "phase0_report_processing_hash": report["provenance"][
+                    "processing_hash"
+                ],
+            },
         )
         result = {
             k: report[k]

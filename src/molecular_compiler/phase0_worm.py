@@ -553,7 +553,6 @@ def gauge_audit_worm(
 ):
     """Promoter-expression proxy for gain and autoresponse estimate for drive."""
     names = manifest["neuron_names"]
-    by_name = {v: k for k, v in manifest["gene_names"].items()}
     abundance = np.asarray(graph.abundance)
     centered = abundance - abundance.mean(axis=0)
     u, s, _ = np.linalg.svd(centered, full_matrices=False)
@@ -576,9 +575,9 @@ def gauge_audit_worm(
         }
 
     report = {}
-    if promoter in by_name:
-        gene = list(graph.gene_ids).index(by_name[promoter])
-        values = abundance[:, gene]
+    proxies = manifest.get("gauge_proxies", {})
+    if promoter in proxies:
+        values = np.array([proxies[promoter][n] for n in names])
         rows = np.arange(len(names))
         report["indicator"] = audit(
             values,
@@ -590,7 +589,7 @@ def gauge_audit_worm(
     else:
         report["indicator"] = {
             "status": "unavailable",
-            "reason": f"{promoter} not among modeled genes",
+            "reason": f"{promoter} expression not in the ingestion manifest",
         }
     diagonal = np.diag(wt["dff"])
     rows = np.flatnonzero(np.isfinite(diagonal) & (np.diag(wt["occurrences"]) >= 3))
@@ -677,7 +676,12 @@ def jaxley_capability_audit():
 
 
 def single_cell_trial():
-    """S-R4 numerical comparison on the synthetic single-cell reference."""
+    """S-R4 numerical comparison on the synthetic single-cell reference (float64)."""
+    with jax.enable_x64(True):
+        return _single_cell_trial()
+
+
+def _single_cell_trial():
     from .compiler import compile
     from .fixtures import synthetic_system
     from .jaxley_backend import build_single_cell, run_single_cell
@@ -776,7 +780,7 @@ def standard_models(k=K2_COMPILER_K):
     return [
         lr.Model("B0", "connectome_only"),
         lr.Model("B1", "black_box", ridge=1e-4),
-        lr.Model("B2", "dense_free", ridge=1e-2),
+        lr.Model("B2", "dense_free", ridge=1e-3, learning_rate=0.005),
         lr.Model("B5", "connectome_free", ridge=1e-3),
         lr.Model("B4", "compositional", k=k, peptides=False),
         lr.Model("compiler", "compositional", k=k, peptides=True),
@@ -850,11 +854,13 @@ def run(project, registration, output, steps=1500, ripoll_csv=None):
     atlas = align_atlas(load_atlas(Path(project) / "signal_propagation.npz"), n)
     wt, unc31 = atlas["wt"], atlas["unc31"]
     inputs = atlas_inputs(graph, manifest)
+    ingestion = json.loads((Path(project) / "ingestion-report.json").read_text())
     report = {
         "status": "phase0_run",
         "data_kind": "real",
-        "tier": graph.metadata["tier"],
-        "provenance": graph.metadata,
+        "tier": ingestion["provenance"]["tier"],
+        "provenance": ingestion["provenance"],
+        "prepared_graph_hash": graph.metadata["processing_hash"],
         "registration_hash": registration["processing_hash"],
     }
     reg = registration["registration"]
@@ -1122,3 +1128,253 @@ def stage_b(splits, reg):
         "metric_targets": targets,
         "rule": reg["stage_b_rules"],
     }
+
+
+def exploratory(graph, manifest, registration, policy=None):
+    """Post-hoc sensitivity analyses. Not pre-registered; never change a gate."""
+    policy = policy or ResolutionPolicy.default()
+    reg = registration["registration"]
+    names = manifest["neuron_names"]
+    classes = reg["class_partition"]["neuron_to_class"]
+    mapping = reg["splits"]["leave_class_out"]["class_to_fold"]
+    standardized = []
+    for f in range(FOLDS):
+        held = {i for i, n in enumerate(names) if mapping[classes[n]] == f}
+        x = training_design(graph, held)
+        x = x[:, np.std(x, axis=0) > 0]
+        z = (x - x.mean(axis=0)) / x.std(axis=0)
+        standardized.append(rank_analysis(z)["participation_ratio"])
+    genes = graph.molecular.genes.to_pylist()
+    keep = [
+        g
+        for g in genes
+        if g["molecule_class"]
+        in {"channel", "receptor", "transporter", "gpcr", "innexin"}
+    ]
+    x = np.asarray([g["plm_embedding"] for g in keep], dtype=np.float64)
+    x /= np.linalg.norm(x, axis=1, keepdims=True)
+    similarity = x @ x.T
+    np.fill_diagonal(similarity, -np.inf)
+    labels = np.array([g["molecule_class"] for g in keep])
+    class_accuracy = float(np.mean(labels[np.argmax(similarity, axis=1)] == labels))
+    outside, rest_low = policy.extracellular_mM[2], policy.rest_voltage_range_mV[0]
+    thermal = float(nernst(outside, outside / np.e, -1, policy.temperature_C))
+    stable_below = float(outside * np.exp(rest_low / -thermal))
+    return {
+        "pre_registered": False,
+        "K4_participation_ratio_standardized_columns": standardized,
+        "plm_molecule_class_1nn_accuracy": class_accuracy,
+        "K3_chloride_for_stable_inhibition_mM": {
+            "value": stable_below,
+            "meaning": "anion-receptor synapses are inhibitory at every rest "
+            f"potential in {list(policy.rest_voltage_range_mV)} mV only if "
+            "[Cl-]i stays below this concentration",
+        },
+    }
+
+
+def _fmt(value, digits=3):
+    if value is None:
+        return "n/a"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def _diff(entry):
+    if entry is None or entry["mean"] is None:
+        return "n/a"
+    interval = entry["interval"]
+    if interval is None:
+        return f"{entry['mean']:+.3f} (interval unavailable)"
+    return f"{entry['mean']:+.3f} [{interval[0]:+.3f}, {interval[1]:+.3f}]"
+
+
+def render_report(report, exploratory_results=None):
+    """Human-readable Phase 0 report. Inherits the data tier of its inputs."""
+    k1, k2, k3, k4 = (report[k] for k in ("K1", "K2", "K3", "K4"))
+    gauge, plm = report["gauge_audit"], report["plm_family_recovery"]
+    lines = [
+        "# Phase 0 feasibility report: C. elegans",
+        "",
+        (
+            f"Data tier: **{report['tier']}** (inherited from the inputs; derived results "
+            "must not be published while any input is restricted, Section 12.8)."
+        ),
+        f"Stage A registration hash: `{report['registration_hash']}`.",
+        f"Processing hash: `{report['provenance']['processing_hash']}`.",
+        "",
+        (
+            "Responses are modeled by a steady-state linear-response approximation of "
+            "the compiler (no kinetics or time course). Phase 0 conclusions are "
+            "conditional on that approximation."
+        ),
+        "",
+        "## Kill criteria",
+        "",
+        "| ID | Pre-registered test | Result | Threshold | Outcome |",
+        "|---|---|---|---|---|",
+        (
+            f"| K1 | rank_eps(X) | {k1['rank']['rank_epsilon']} (participation "
+            f"{_fmt(k1['rank']['participation_ratio'], 2)}) | >= {k1['threshold']} | "
+            f"{'pass' if k1['passed'] else 'fail'} |"
+        ),
+        (
+            f"| K2 | compiler - B4 detection AUROC, unwired held-out pairs | "
+            f"{_diff(k2['unwired']['perturbation_detection'])} | interval > 0 | peptides "
+            f"{'required' if k2['peptides_required'] else 'not required'} |"
+        ),
+        (
+            f"| K3 | sign-ambiguous Glu/GABA edges | {_fmt(k3['ambiguous_fraction'])} | "
+            f"<= {k3['threshold']} | {'pass' if k3['passed'] else 'fail'} |"
+        ),
+        (
+            f"| K4 | interpolation fraction; min training participation ratio | "
+            f"{_fmt(k4['interpolation_fraction'])}; "
+            f"{_fmt(k4['training_participation_ratio_min'], 2)} | <= "
+            f"{k4['thresholds']['maximum_interpolation_fraction']}; >= "
+            f"{k4['thresholds']['minimum_participation_ratio']} | "
+            f"{'pass' if k4['passed'] else 'fail'} |"
+        ),
+        "",
+        "## Audits",
+        "",
+        (
+            f"- Gauge ({gauge['status']}): indicator proxy max |rho| "
+            f"{_fmt(gauge['indicator'].get('max_abs_spearman_with_expression_pcs'))}, "
+            f"p = {_fmt(gauge['indicator'].get('permutation_p'))}, confounded: "
+            f"{_fmt(gauge['indicator'].get('confounded'))}; opsin drive max |rho| "
+            f"{_fmt(gauge['opsin']['max_abs_spearman_with_expression_pcs'])}, p = "
+            f"{_fmt(gauge['opsin']['permutation_p'])}, confounded: "
+            f"{_fmt(gauge['opsin']['confounded'])}."
+        ),
+        (
+            f"- PLM family recovery: {_fmt(plm['accuracy'])} over {plm['genes']} genes in "
+            f"{plm['families']} families (minimum 0.9): "
+            f"{'pass' if plm['passed'] else 'fail'}."
+        ),
+        (
+            f"- Jaxley (S-R4): backend **{report['jaxley_audit']['decision']}**; "
+            "conditions 1-3 fail at the interface audit. Single-cell float64 "
+            "comparison: max |dV| "
+            f"{report['jaxley_single_cell']['trajectory_max_abs_difference_mV']:.1e} mV, "
+            "gradient relative difference "
+            f"{report['jaxley_single_cell']['gradient_relative_difference']:.1e}."
+        ),
+    ]
+    if "peptide_network_check" in report:
+        p = report["peptide_network_check"]
+        lines.append(
+            f"- Peptide network vs Ripoll-Sanchez long-range model: recall "
+            f"{_fmt(p['recall_of_reference'])}, precision {_fmt(p['precision_vs_reference'])}, "
+            f"Jaccard {_fmt(p['jaccard'])}."
+        )
+    c = report["provenance"]
+    lines += ["", f"Inputs: {', '.join(r['dataset_id'] for r in c['inputs'])}.", ""]
+    for split, summary in report["splits"].items():
+        ceilings = report["noise_ceilings"][split]
+        lines += [
+            f"## {split} ({summary['n_pairs']} held-out pairs)",
+            "",
+            (
+                f"Ceilings: amplitude {_fmt(ceilings['amplitude'])}, sign "
+                f"{_fmt(ceilings['sign'])}. Detection has no valid ceiling and is raw."
+            ),
+            "",
+            (
+                "| Model | Parameters | Detection AUROC | Sign accuracy | Amplitude r | "
+                "Amplitude / ceiling |"
+            ),
+            "|---|---|---|---|---|---|",
+        ]
+        for name, m in summary["metrics"].items():
+            lines.append(
+                f"| {name} | {summary['parameter_counts'][name]} | "
+                f"{_fmt(m['raw']['perturbation_detection'])} | "
+                f"{_fmt(m['raw']['perturbation_sign'])} | "
+                f"{_fmt(m['raw']['perturbation_amplitude'])} | "
+                f"{_fmt(m['normalized']['perturbation_amplitude'])} |"
+            )
+        lines += [
+            "",
+            "| Paired difference (95% cluster bootstrap) | Detection | Sign | Amplitude |",
+            "|---|---|---|---|",
+        ]
+        for name, comparison in summary["comparisons"].items():
+            lines.append(
+                f"| {name} | {_diff(comparison['perturbation_detection'])} | "
+                f"{_diff(comparison['perturbation_sign'])} | "
+                f"{_diff(comparison['perturbation_amplitude'])} |"
+            )
+        lines.append(
+            f"| B5-B2 | {_diff(summary['B5-B2']['perturbation_detection'])} | n/a | "
+            f"{_diff(summary['B5-B2']['perturbation_amplitude'])} |"
+        )
+        lines.append("")
+    unc = report["unc31_check"]
+    lines += [
+        "## unc-31 check",
+        "",
+        (
+            "WT-fitted compiler evaluated on unc-31 pairs; difference is peptides off "
+            "minus on."
+        ),
+        "",
+    ]
+    for group in ("all", "unwired", "wired"):
+        d = unc[group]["peptides_off_minus_on"]
+        lines.append(
+            f"- {group} ({unc[group]['n_pairs']} pairs): detection "
+            f"{_diff(d['perturbation_detection'])}, amplitude "
+            f"{_diff(d['perturbation_amplitude'])}"
+        )
+    b5 = report["B5_check"]
+    stage = report["stage_b"]
+    lines += [
+        "",
+        "## B5 check against Creamer et al.",
+        "",
+        (
+            f"Published relative correlation {b5['published']['relative_correlation']} "
+            f"(earlier versions {b5['published']['earlier_versions_relative_correlation']}) "
+            "on held-out animals. Here B5 reaches "
+            f"{_fmt(b5['B5_normalized_amplitude'])} of the amplitude ceiling on held-out "
+            "stimulation targets. The splits and metrics are not comparable "
+            f"({b5['reason']}). Anatomy-constrained B5 no worse than unconstrained B2: "
+            f"{_fmt(b5['anatomy_constraint_no_worse'])}."
+        ),
+        "",
+        "## Stage B (derived by the pre-registered rules)",
+        "",
+        (
+            f"- Architecture: `{stage['architecture']}`; absolute trainable-parameter "
+            f"budget: **{stage['absolute_parameter_budget']}**."
+        ),
+        "- Metric targets:",
+    ]
+    for key, target in stage["metric_targets"].items():
+        lines.append(
+            f"  - {key}: "
+            + (
+                "n/a"
+                if target is None
+                else f"{target['target']:.3f} ({target['units']})"
+            )
+        )
+    if exploratory_results:
+        lines += ["", "## Exploratory (not pre-registered)", ""]
+        e = exploratory_results
+        lines += [
+            "- K4 training participation ratio with standardized columns: "
+            + ", ".join(
+                f"{v:.1f}" for v in e["K4_participation_ratio_standardized_columns"]
+            ),
+            f"- PLM 1-NN molecule-class accuracy: {e['plm_molecule_class_1nn_accuracy']:.3f}",
+            (
+                "- Anion synapses are stably inhibitory only if [Cl-]i < "
+                f"{e['K3_chloride_for_stable_inhibition_mM']['value']:.1f} mM."
+            ),
+        ]
+    return "\n".join(lines) + "\n"
