@@ -154,3 +154,119 @@ def test_M7_connectome_unit_conversion_is_validated():
         replace(policy, synapse_unit_nS=0.0)
     with pytest.raises(ValueError):
         replace(policy, gap_unit_nS=-1.0)
+
+
+def test_M10_phase1_fold_training_resumes_identically(tmp_path, monkeypatch):
+    import molecular_compiler.phase1_worm as p1
+
+    n = 6
+    rng = np.random.default_rng(0)
+    target = rng.normal(size=(n, n))
+    weights = (rng.random((n, n)) < 0.7).astype(float)
+
+    def predict(params, nuisance, columns, auto):
+        base = jnp.outer(params["a"], params["b"])[:, columns]
+        return jnp.exp(nuisance["log_gain"]) * base * auto[columns][None, :]
+
+    params = {"a": jnp.ones(n), "b": jnp.linspace(0.5, 1.5, n)}
+    auto = np.ones(n)
+    args = (predict, params, target, weights, auto, 4, 2)
+    full, full_history = p1.train_fold(*args)
+
+    class Stop(Exception):
+        pass
+
+    original = p1._save_checkpoint
+
+    def save_then_stop(path, data):
+        original(path, data)
+        if len(data["history"]) == 2:
+            raise Stop
+
+    path = tmp_path / "fold.ckpt"
+    monkeypatch.setattr(p1, "_save_checkpoint", save_then_stop)
+    with pytest.raises(Stop):
+        p1.train_fold(*args, checkpoint=path)
+    monkeypatch.setattr(p1, "_save_checkpoint", original)
+    resumed, history = p1.train_fold(*args, checkpoint=path)
+    assert [h["loss"] for h in history] == pytest.approx(
+        [h["loss"] for h in full_history]
+    )
+    np.testing.assert_allclose(resumed["rules"]["a"], full["rules"]["a"])
+    with pytest.raises(ValueError):
+        p1.train_fold(predict, params, target, weights, auto, 5, 2, checkpoint=path)
+
+
+def test_S12_1_family_recovery_on_curated_library():
+    from molecular_compiler.worm_kinetics import family_recovery
+
+    graph, names = _graph(
+        ["glc-1", "glc-2", "acr-2", "acr-3", "egl-19"],
+        ["receptor"] * 4 + ["channel"],
+    )
+    genes = graph.molecular.genes.to_pylist()
+    for gene, vector in zip(genes, ([0, 0], [0, 1], [10, 0], [10, 1], [5, 5])):
+        gene["plm_embedding"] = vector
+    result = family_recovery(build_worm_library(graph, names, metadata={}))
+    assert result["rate"] == 1.0 and result["passed"]
+    assert result["singleton_families"] == ["CaV1"]
+    assert result["per_form"] == {"ligand_gated": 1.0}
+    genes[1]["plm_embedding"] = [10, 0.5]
+    result = family_recovery(build_worm_library(graph, names, metadata={}))
+    assert result["per_family"]["GluCl_anion"]["recovered"] == 0
+    assert not result["passed"]
+
+
+def test_M5_neutral_transporters_follow_the_basal_chloride():
+    graph, names = _graph(["eat-4", "kcc-2"], ["transporter", "transporter"])
+    for basal in (5.0, 12.0):
+        library = build_worm_library(graph, names, {}, basal_chloride_mM=basal)
+        assert library.records["WB0"].transport_equilibrium_mM == {"Cl": basal}
+        assert library.records["WB1"].transport_equilibrium_mM == {"Cl": 5.0}
+
+
+def test_M10_phase1_residual_report_flags_unused_structure():
+    from molecular_compiler import linear_response as lr
+    from molecular_compiler.phase1_worm import residual_report
+
+    n = 30
+    rng = np.random.default_rng(0)
+    chemical = (rng.random((n, n)) < 0.3).astype(float)
+    inputs = lr.AtlasInputs(
+        chemical=chemical,
+        gap=np.zeros((n, n)),
+        expression=rng.random((n, 4)),
+        tokens=np.zeros((4, 2)),
+        releases=np.zeros((n, 3)),
+        receptor_ligand=np.full(4, -1),
+        innexins=np.array([], dtype=int),
+        pair_peptide=np.array([0]),
+        pair_receptor=np.array([1]),
+        pair_potency=np.array([1.0]),
+        transmitter_sign=np.zeros(n),
+        identity=np.zeros((n, 2)),
+    )
+    pairs = np.array([(i, j) for i in range(n) for j in range(n) if i != j])
+    unwired = chemical[pairs[:, 0], pairs[:, 1]] == 0
+    observed = np.where(unwired, 1.0, 0.0) + rng.normal(0, 0.1, len(pairs))
+    rows = residual_report(inputs, np.ones(n), pairs, observed, np.zeros(len(pairs)))
+    by_name = {row["feature"]: row for row in rows}
+    assert by_name["no_direct_connection"]["candidate_addition"] is True
+    assert by_name["peptide_coupling"]["candidate_addition"] is False
+    assert "log_autoresponse" not in by_name  # constant feature is skipped
+
+
+def test_M12_pair_matrix_aggregates_trials_by_responder_and_stimulated():
+    from molecular_compiler.phase1_worm import pair_matrix
+
+    responses = {
+        "animal": np.array([1, 1, 2, 2]),
+        "responder": np.array([0, 0, 1, 0]),
+        "stimulated": np.array([1, 1, 0, 1]),
+        "mean_dff": np.array([1.0, 3.0, 5.0, 2.0]),
+    }
+    mean, count, trials = pair_matrix(responses, 2)
+    assert mean[0, 1] == 2.0 and count[0, 1] == 3 and np.isnan(mean[0, 0])
+    np.testing.assert_array_equal(np.sort(trials[0][1]), [1.0, 2.0, 3.0])
+    mean, count, _ = pair_matrix(responses, 2, rows=np.array([2, 3]))
+    assert mean[1, 0] == 5.0 and mean[0, 1] == 2.0 and count[0, 1] == 1

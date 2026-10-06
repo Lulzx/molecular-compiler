@@ -27,6 +27,7 @@ Declared approximations (Section 10.3):
 """
 
 import json
+import pickle
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -111,7 +112,10 @@ def setup(project, budget):
         "phase1_kinetics_curation"
     )
     library = build_worm_library(
-        graph, manifest["gene_names"], inherit([curation], "phase1")
+        graph,
+        manifest["gene_names"],
+        inherit([curation], "phase1"),
+        basal_chloride_mM=CHLORIDE_MM,
     )
     frozen = frozen_basis(graph)
     rules = RuleNetwork.initialize_partial(
@@ -120,21 +124,22 @@ def setup(project, budget):
     return graph, manifest, atlas, library, rules
 
 
-def make_simulator(graph, rules, library, pol):
+def make_simulator(graph, rules, library, pol, half_saturation=None):
     """Return f(params, nuisance, columns) -> predicted dF/F0 [N, len(columns)]."""
     from .compiler import compile
     from .simulation import _sequential, initial_state
 
     n = len(graph.neuron_ids)
-    warm_steps = round(WARMUP_S / DT_S)
-    pulse_steps = round(PULSE_S / DT_S)
-    post_steps = round(POST_S / DT_S)
+    warm_steps = round(WARMUP_S / pol.dt_s)
+    pulse_steps = round(PULSE_S / pol.dt_s)
+    post_steps = round(POST_S / pol.dt_s)
 
     def relax(sim):
         return _sequential(sim, initial_state(sim), jnp.zeros((warm_steps, n)))[0]
 
-    initial = relax(compile(graph, rules, library, resolution=pol))
-    half_saturation = float(np.median(np.maximum(np.asarray(initial.calcium), 0)))
+    if half_saturation is None:
+        initial = relax(compile(graph, rules, library, resolution=pol))
+        half_saturation = float(np.median(np.maximum(np.asarray(initial.calcium), 0)))
 
     def fluorescence(calcium):
         power = jnp.maximum(calcium, 0) ** 2
@@ -184,10 +189,45 @@ def make_simulator(graph, rules, library, pol):
     return predict, responses
 
 
+def _save_checkpoint(path, payload):
+    path = Path(path)
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("wb") as handle:
+        pickle.dump(jax.device_get(payload), handle)
+    temporary.replace(path)
+
+
+def _load_checkpoint(path, config):
+    path = Path(path)
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        payload = pickle.load(handle)
+    if payload["config"] != config:
+        raise ValueError(
+            f"{path}: checkpoint was written with {payload['config']}, not {config}"
+        )
+    return payload
+
+
 def train_fold(
-    predict, params, target, weights, auto, steps, batch, seed=SEED, lr=0.05
+    predict,
+    params,
+    target,
+    weights,
+    auto,
+    steps,
+    batch,
+    seed=SEED,
+    lr=0.05,
+    checkpoint=None,
 ):
-    """AdamW on rule parameters and the global gain; random column batches."""
+    """AdamW on rule parameters and the global gain; random column batches.
+
+    With `checkpoint`, parameters, optimizer state, the batch RNG and the
+    history are saved after every step, and a matching checkpoint is resumed.
+    A resumed run draws the same batches as an uninterrupted one.
+    """
     trainable = {"rules": params, "nuisance": {"log_gain": jnp.array(0.0)}}
     columns = np.flatnonzero(weights.sum(axis=0) > 0)
     target = jnp.asarray(np.nan_to_num(target))
@@ -211,7 +251,16 @@ def train_fold(
 
     rng = np.random.default_rng(seed)
     history = []
-    for iteration in range(steps):
+    config = {"steps": steps, "batch": batch, "seed": seed, "lr": lr}
+    if checkpoint is not None:
+        payload = _load_checkpoint(checkpoint, config)
+        if payload is not None:
+            trainable = jax.tree.map(jnp.asarray, payload["trainable"])
+            state = jax.tree.map(jnp.asarray, payload["state"])
+            rng.bit_generator.state = payload["rng"]
+            history = payload["history"]
+            print(json.dumps({"resumed_at_step": len(history)}), flush=True)
+    for iteration in range(len(history), steps):
         chosen = jnp.asarray(rng.choice(columns, size=batch, replace=False))
         start = time.perf_counter()
         trainable, state, value, norm = update(trainable, state, chosen)
@@ -226,6 +275,17 @@ def train_fold(
             }
         )
         print(json.dumps(history[-1]), flush=True)
+        if checkpoint is not None:
+            _save_checkpoint(
+                checkpoint,
+                {
+                    "config": config,
+                    "trainable": trainable,
+                    "state": state,
+                    "rng": rng.bit_generator.state,
+                    "history": history,
+                },
+            )
     return trainable, history
 
 
@@ -260,6 +320,7 @@ def run_fold(project, registration, split, fold, output, steps, batch):
             if f != fold:
                 continue
             start = time.perf_counter()
+            Path(output).mkdir(parents=True, exist_ok=True)
             trainable, history = train_fold(
                 predict,
                 rules.params,
@@ -268,6 +329,7 @@ def run_fold(project, registration, split, fold, output, steps, batch):
                 auto,
                 steps,
                 batch,
+                checkpoint=Path(output) / f"{split}-fold{fold}.ckpt",
             )
             columns = np.flatnonzero(test.any(axis=0))
             prediction = predict_all(predict, trainable, columns, jnp.asarray(auto))
@@ -357,10 +419,65 @@ def report(project, registration, output, steps=1500):
         summary = summarize(predictions, values, labels, clusters, ceilings)
         summary["ceilings"] = ceilings
         summary["acceptance"] = acceptance(summary)
+        auto, _ = autoresponse(wt["dff"])
+        summary["residual_analysis"] = residual_report(
+            inputs, auto, pairs, values, predictions["compiler"]
+        )
         result["splits"][split] = summary
     result["data_tier"] = "restricted"
     _dump(out / "phase1-report.json", result)
     return result
+
+
+def residual_features(inputs, auto, pairs):
+    """Per-pair features the Phase 1 model does not use, plus two diagnostics.
+
+    - peptide_coupling: released peptide (stimulated) x matched receptor
+      (responder) x potency; peptides are off in Phase 1 (Section 10.2, K2);
+    - no_direct_connection: neither a chemical synapse nor a gap junction
+      joins the pair (diagnostic for polysynaptic or extrasynaptic paths);
+    - log_autoresponse: the gauge input (Section 6.3); a trend here means the
+      drive gauge is inadequate.
+    """
+    responder, stimulated = pairs[:, 0], pairs[:, 1]
+    e = inputs.expression
+    release = e[:, inputs.pair_peptide] * inputs.pair_potency
+    receive = e[:, inputs.pair_receptor]
+    peptide = (receive[responder] * release[stimulated]).sum(axis=1)
+    direct = (inputs.chemical[responder, stimulated] > 0) | (
+        inputs.gap[responder, stimulated] > 0
+    )
+    features = np.column_stack(
+        [
+            np.log1p(peptide),
+            (~direct).astype(float),
+            np.log(np.maximum(auto[stimulated], 1e-6)),
+        ]
+    )
+    return features, ["peptide_coupling", "no_direct_connection", "log_autoresponse"]
+
+
+def residual_report(inputs, auto, pairs, observed, predicted):
+    """M10 residual analysis on held-out errors (residuals are off in Phase 1)."""
+    from .training import residual_analysis
+
+    features, names = residual_features(inputs, auto, pairs)
+    error = np.asarray(observed) - np.asarray(predicted)
+    finite = np.isfinite(error)
+    rows = residual_analysis(error[finite], features[finite], names)
+    return [
+        {
+            k: (
+                bool(v)
+                if isinstance(v, np.bool_)
+                else float(v)
+                if k != "feature"
+                else v
+            )
+            for k, v in row.items()
+        }
+        for row in rows
+    ]
 
 
 def acceptance(summary):
@@ -386,3 +503,265 @@ def acceptance(summary):
         for value in verdict[baseline].values()
     )
     return verdict
+
+
+def net_reversal(sim):
+    """Density-weighted reversal per synapse edge, and the receptor mass."""
+    density = np.asarray(sim.syn_params["density"])
+    gbar = np.asarray(sim.syn_params["gbar"])
+    weight = density * gbar[None, :]
+    mass = weight.sum(axis=1)
+    reversal = np.asarray(sim.syn_params["reversal"])
+    net = np.where(
+        mass > 0, (weight * reversal).sum(axis=1) / np.maximum(mass, 1e-30), np.nan
+    )
+    return net, mass
+
+
+def audit(project, output):
+    """Pre-training audit of the Phase 1 model (restricted; no targets read)."""
+    from .compiler import compile
+    from .simulation import _sequential, initial_state
+    from .worm_kinetics import family_recovery, library_summary
+
+    graph, _manifest, _atlas, library, rules = setup(project, 13)
+    with jax.enable_x64(True):
+        pol = policy()
+        sim = compile(graph, rules, library, resolution=pol)
+        n = len(graph.neuron_ids)
+        steps = round(WARMUP_S / DT_S)
+        first, _ = _sequential(sim, initial_state(sim), jnp.zeros((steps, n)))
+        second, _ = _sequential(sim, first, jnp.zeros((steps // 2, n)))
+        voltage = np.asarray(second.voltage)[:, 0]
+        drift = float(
+            np.max(np.abs(np.asarray(second.voltage) - np.asarray(first.voltage)))
+        )
+        net, _mass = net_reversal(sim)
+        post = np.asarray(sim.syn_post_idx)
+        valid = np.isfinite(net)
+        inhibitory = valid & (net < voltage[post])
+        result = {
+            "library": library_summary(library),
+            "family_recovery": family_recovery(library),
+            "sign_audit": sim.metadata["sign_audit"],
+            "rest": {
+                "voltage_percentiles_mV": dict(
+                    zip(
+                        ("10", "50", "90"),
+                        np.percentile(voltage, [10, 50, 90]).tolist(),
+                    )
+                ),
+                "max_drift_mV_over_10s": drift,
+                "median_calcium": float(
+                    np.median(np.maximum(np.asarray(second.calcium), 0))
+                ),
+            },
+            "synapses": {
+                "edges": len(net),
+                "with_receptors": int(valid.sum()),
+                "net_inhibitory_at_rest": int(inhibitory.sum()),
+                "net_inhibitory_fraction": float(
+                    inhibitory.sum() / max(valid.sum(), 1)
+                ),
+                "chloride_mM": CHLORIDE_MM,
+            },
+            "policy": {
+                "dt_s": DT_S,
+                "synapse_unit_nS": SYNAPSE_UNIT_NS,
+                "gap_unit_nS": GAP_UNIT_NS,
+            },
+            "data_tier": "restricted",
+        }
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
+    _dump(out / "audit.json", result)
+    return result
+
+
+def pair_matrix(responses, n, rows=None):
+    """Trial means, counts and per-pair trial lists [responder, stimulated]."""
+    rows = np.arange(len(responses["animal"])) if rows is None else rows
+    responder = responses["responder"][rows]
+    stimulated = responses["stimulated"][rows]
+    values = responses["mean_dff"][rows]
+    total, count = np.zeros((n, n)), np.zeros((n, n), dtype=int)
+    np.add.at(total, (responder, stimulated), values)
+    np.add.at(count, (responder, stimulated), 1)
+    mean = np.where(count > 0, total / np.maximum(count, 1), np.nan)
+    order = np.lexsort((stimulated, responder))
+    trials = [[np.empty(0)] * n for _ in range(n)]
+    keys = responder[order] * n + stimulated[order]
+    starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
+    for start, stop in zip(starts, np.r_[starts[1:], len(keys)]):
+        index = order[start]
+        trials[responder[index]][stimulated[index]] = values[order[start:stop]]
+    return mean, count, trials
+
+
+def held_out_animals(project, output, steps=1500, folds=FOLDS, seed=SEED):
+    """Exploratory: generalization to unseen animals (pre_registered: false).
+
+    Uses the ingested Randi traces (atlas-included, non-outlier, label
+    confidence >= 0.95). Animals are split into folds; models are fit on the
+    pair means of training animals and scored on the pair means of held-out
+    animals. The drive gauge uses the held-out animals' own autoresponses.
+    Labels are the atlas q-values, computed on all animals (declared leak:
+    labels only define the detection and sign subsets). This is the split of
+    Creamer et al. that the pooled atlas could not reproduce in Phase 0.
+    """
+    from . import linear_response as lr
+    from .phase0_worm import (
+        amplitude_ceiling,
+        atlas_inputs,
+        sign_ceiling,
+        standard_models,
+        summarize,
+    )
+    from .randi_traces import load_responses
+    from .worm_public import load_atlas, load_worm_project
+
+    graph, manifest = load_worm_project(project)
+    names = manifest["neuron_names"]
+    n = len(names)
+    atlas = align_atlas(load_atlas(Path(project) / "signal_propagation.npz"), n)
+    inputs = atlas_inputs(graph, manifest)
+    responses = load_responses(project, "wt")
+    animals = np.unique(responses["animal"])
+    rng = np.random.default_rng(seed)
+    assignment = dict(zip(rng.permutation(animals), np.arange(len(animals)) % folds))
+    fold_of = np.array([assignment[a] for a in responses["animal"]])
+    models = standard_models()
+    pooled = {m.name: [] for m in models}
+    observed_values, labels, clusters, test_pairs = [], [], [], []
+    test_trials = [[np.empty(0)] * n for _ in range(n)]
+    for fold in range(folds):
+        train, count, _ = pair_matrix(responses, n, np.flatnonzero(fold_of != fold))
+        test, test_count, trials = pair_matrix(
+            responses, n, np.flatnonzero(fold_of == fold)
+        )
+        off = ~np.eye(n, dtype=bool)
+        weights = np.minimum(count, 20).astype(float) * off
+        train_auto, _ = autoresponse(train)
+        test_auto, _ = autoresponse(test)
+        index = np.nonzero((test_count > 0) & off)
+        observed_values.append(test[index])
+        labels.append(atlas["wt"]["q"][index] < 0.05)
+        clusters.append(np.array(names, dtype=object)[index[1]])
+        test_pairs.append(np.stack(index, axis=1))
+        for i, j in zip(*index):
+            test_trials[i][j] = np.concatenate([test_trials[i][j], trials[i][j]])
+        for model in models:
+            params, _ = lr.fit(model, inputs, train, weights, train_auto, steps=steps)
+            prediction = np.asarray(
+                lr.predict(model, params, inputs, jnp.asarray(test_auto))
+            )
+            pooled[model.name].append(prediction[index])
+    predictions = {k: np.concatenate(v) for k, v in pooled.items()}
+    values = np.concatenate(observed_values)
+    labels = np.concatenate(labels)
+    pairs = np.concatenate(test_pairs)
+    mask = np.zeros((n, n), dtype=bool)
+    mask[tuple(pairs.T)] = True
+    q = atlas["wt"]["q"]
+    ceilings = {
+        "amplitude": amplitude_ceiling(test_trials, mask)[0],
+        "sign": sign_ceiling(test_trials, mask & (q < 0.05))[0],
+    }
+    summary = summarize(predictions, values, labels, np.concatenate(clusters), ceilings)
+    result = {
+        "pre_registered": False,
+        "split": "held_out_animals",
+        "folds": folds,
+        "animals": len(animals),
+        "trials": len(responses["animal"]),
+        "ceilings": ceilings,
+        **summary,
+        "data_tier": "restricted",
+    }
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
+    _dump(out / "held-out-animals.json", result)
+    return result
+
+
+def convergence_test(project, output, columns=24, seed=SEED, tolerance=0.02):
+    """Section 12.6 on the Phase 1 model: halve dt; separately add two compartments.
+
+    The initial (untrained) model is compared at the chosen resolution and at
+    each refinement on the same observed pairs of a seeded subset of
+    stimulated columns. A refinement passes when every Section 9.1 metric
+    changes by less than `tolerance` x its noise ceiling (detection has no
+    ceiling and uses `tolerance` in raw AUROC, declared). The half-saturation
+    is fixed from the base resolution so only the numerics change.
+    """
+    from .phase0_worm import _metrics, amplitude_ceiling, sign_ceiling
+
+    graph, _manifest, atlas, library, rules = setup(project, 13)
+    wt = atlas["wt"]
+    observed = observed_mask(wt)
+    auto, _ = autoresponse(wt["dff"])
+    candidates = np.flatnonzero(observed.any(axis=0))
+    chosen = np.sort(
+        np.random.default_rng(seed).choice(candidates, columns, replace=False)
+    )
+    mask = np.zeros_like(observed)
+    mask[:, chosen] = observed[:, chosen]
+    index = np.nonzero(mask)
+    labels = wt["q"][index] < 0.05
+    ceilings = {
+        "perturbation_amplitude": amplitude_ceiling(wt["trials"], mask)[0],
+        "perturbation_sign": sign_ceiling(wt["trials"], mask & (wt["q"] < 0.05))[0],
+        "perturbation_detection": 1.0,
+    }
+    base = policy()
+    variants = {
+        "base": base,
+        "half_dt": replace(base, dt_s=base.dt_s / 2),
+        "plus_two_compartments": replace(base, n_comp=base.n_comp + 2),
+    }
+    results, half_saturation = {}, None
+    with jax.enable_x64(True):
+        for name, pol in variants.items():
+            start = time.perf_counter()
+            predict, _ = make_simulator(graph, rules, library, pol, half_saturation)
+            half_saturation = predict.half_saturation
+            trainable = {
+                "rules": rules.params,
+                "nuisance": {"log_gain": jnp.array(0.0)},
+            }
+            full = np.full(observed.shape, np.nan)
+            full[:, chosen] = predict_all(predict, trainable, chosen, jnp.asarray(auto))
+            results[name] = {
+                "metrics": _metrics(full[index], wt["dff"][index], labels),
+                "prediction": full[index],
+                "seconds": time.perf_counter() - start,
+            }
+            print(json.dumps({name: results[name]["metrics"]}), flush=True)
+    report = {"columns": chosen.tolist(), "pairs": len(index[0]), "ceilings": ceilings}
+    for name in ("half_dt", "plus_two_compartments"):
+        checks = {}
+        for metric, ceiling in ceilings.items():
+            a = results["base"]["metrics"][metric]
+            b = results[name]["metrics"][metric]
+            change = None if a is None or b is None else abs(b - a)
+            limit = None if ceiling is None else tolerance * ceiling
+            checks[metric] = {
+                "base": a,
+                "refined": b,
+                "change": change,
+                "limit": limit,
+                "passed": None if change is None or limit is None else change < limit,
+            }
+        difference = results[name]["prediction"] - results["base"]["prediction"]
+        report[name] = {
+            "checks": checks,
+            "passed": all(c["passed"] is True for c in checks.values()),
+            "max_abs_prediction_change": float(np.nanmax(np.abs(difference))),
+            "seconds": results[name]["seconds"],
+        }
+    report["policy"] = {"dt_s": base.dt_s, "n_comp": base.n_comp}
+    report["data_tier"] = "restricted"
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
+    _dump(out / "convergence.json", report)
+    return report

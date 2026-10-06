@@ -289,7 +289,7 @@ CURATED_FAMILIES = {
         "source": "no measured neuronal [Cl-]i; lower bound of policy prior",
     },
     "transporter_other": {
-        "chloride": 10.0,
+        "chloride": None,  # set to the basal [Cl-]i by build_worm_library
         "measured": False,
         "source": "neutral: equals the basal [Cl-]i, so no ionic effect",
     },
@@ -373,7 +373,7 @@ def _record(gene, family, spec):
     )
 
 
-def build_worm_library(graph, gene_names, metadata):
+def build_worm_library(graph, gene_names, metadata, basal_chloride_mM=10.0):
     """One curated record per modeled gene, keyed by its gene ID (M5)."""
     from .kinetics import KineticsLibrary
 
@@ -385,7 +385,10 @@ def build_worm_library(graph, gene_names, metadata):
         if family not in CURATED_FAMILIES:
             family = gene["molecule_class"]
         families[gene["gene_id"]] = family
-        records[gene["gene_id"]] = _record(gene, family, CURATED_FAMILIES[family])
+        spec = CURATED_FAMILIES[family]
+        if spec.get("chloride", 0) is None:
+            spec = {**spec, "chloride": basal_chloride_mM}
+        records[gene["gene_id"]] = _record(gene, family, spec)
     return KineticsLibrary(records, metadata=metadata, gene_families=families)
 
 
@@ -397,3 +400,43 @@ def library_summary(library):
         row["measured"] = record.source.startswith("measured")
         row["source"] = record.source
     return rows
+
+
+def family_recovery(library, threshold=0.9):
+    """Spec 10.2: leave-one-out PLM 1-NN recovery of curated kinetic families.
+
+    Only families with at least two members can be recovered; singletons are
+    reported but excluded from the rate. The check decides whether PLM
+    neighbors may stand in for curated family labels (M5-R1 fallback).
+    """
+    records = [r for r in library.records.values() if r.embedding]
+    families = [r.family for r in records]
+    vectors = np.asarray([r.embedding for r in records], dtype=float)
+    counts = {f: families.count(f) for f in set(families)}
+    distances = np.linalg.norm(vectors[:, None] - vectors[None], axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    nearest = distances.argmin(axis=1)
+    per_family, per_form = {}, {}
+    hits = []
+    for i, family in enumerate(families):
+        if counts[family] < 2:
+            continue
+        hit = families[nearest[i]] == family
+        hits.append(hit)
+        per_form.setdefault(records[i].model_form, []).append(hit)
+        row = per_family.setdefault(family, {"genes": counts[family], "recovered": 0})
+        row["recovered"] += int(hit)
+    for row in per_family.values():
+        row["rate"] = row["recovered"] / row["genes"]
+    rate = float(np.mean(hits)) if hits else None
+    return {
+        "rate": rate,
+        "threshold": threshold,
+        "passed": rate is not None and rate >= threshold,
+        "evaluated_genes": len(hits),
+        "singleton_families": sorted(f for f, c in counts.items() if c < 2),
+        "per_family": dict(sorted(per_family.items())),
+        # The pooled rate is dominated by large, homogeneous classes (GPCRs),
+        # so the rate per kinetic form is reported alongside it.
+        "per_form": {k: float(np.mean(v)) for k, v in sorted(per_form.items())},
+    }

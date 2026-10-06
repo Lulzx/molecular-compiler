@@ -60,6 +60,10 @@ def main():
     phase0.add_argument("--output", default="artifacts/phase0")
     phase0.add_argument("--steps", type=int, default=1500)
     phase0.add_argument("--stage-b", default="configs/phase0-stage-b.json")
+    traces = sub.add_parser("traces-ingest", help="ingest Randi et al. 2023 traces")
+    traces.add_argument("--cache", default="data/cache")
+    traces.add_argument("--project", default="data/worm")
+    traces.add_argument("--register", default="data-register.json")
     fold = sub.add_parser("phase1-fold", help="train the full compiler on one fold")
     fold.add_argument("--project", default="data/worm")
     fold.add_argument("--registration", default="configs/phase0-stage-a.json")
@@ -68,6 +72,19 @@ def main():
     fold.add_argument("--fold", type=int, required=True)
     fold.add_argument("--steps", type=int, default=40)
     fold.add_argument("--batch", type=int, default=4)
+    check = sub.add_parser("phase1-audit", help="pre-training audit of the model")
+    check.add_argument("--project", default="data/worm")
+    check.add_argument("--output", default="artifacts/phase1")
+    animals = sub.add_parser(
+        "heldout-animals", help="exploratory held-out-animal comparison"
+    )
+    animals.add_argument("--project", default="data/worm")
+    animals.add_argument("--output", default="artifacts/phase1")
+    animals.add_argument("--steps", type=int, default=1500)
+    converge = sub.add_parser("phase1-convergence", help="Section 12.6 test")
+    converge.add_argument("--project", default="data/worm")
+    converge.add_argument("--output", default="artifacts/phase1")
+    converge.add_argument("--columns", type=int, default=24)
     phase1 = sub.add_parser("phase1-report", help="pool Phase 1 folds vs baselines")
     phase1.add_argument("--project", default="data/worm")
     phase1.add_argument("--registration", default="configs/phase0-stage-a.json")
@@ -114,11 +131,19 @@ def main():
             "path": args.output,
             "processing_hash": freeze_registration(args.output, stage_a(manifest)),
         }
+    elif args.command == "traces-ingest":
+        from .provenance import DataRegister
+        from .randi_traces import ingest as ingest_traces
+
+        report = ingest_traces(
+            args.cache, args.project, DataRegister.load(args.register)
+        )
+        result = {s: report[s]["summary"] for s in ("wt", "unc31")}
     elif args.command == "phase1-fold":
         from .phase0 import load_registration
         from .phase1_worm import run_fold
 
-        result = run_fold(
+        report = run_fold(
             args.project,
             load_registration(args.registration),
             args.split,
@@ -127,24 +152,43 @@ def main():
             args.steps,
             args.batch,
         )
-        print(json.dumps({k: result[k] for k in ("split", "fold", "wall_seconds")}))
+        result = {k: report[k] for k in ("split", "fold", "wall_seconds")}
+    elif args.command == "phase1-audit":
+        from .phase1_worm import audit
+
+        report = audit(args.project, args.output)
+        result = {k: report[k] for k in ("sign_audit", "rest", "synapses")}
+        result["family_recovery"] = {
+            k: report["family_recovery"][k] for k in ("rate", "passed", "per_form")
+        }
+    elif args.command == "heldout-animals":
+        from .phase1_worm import held_out_animals
+
+        report = held_out_animals(args.project, args.output, steps=args.steps)
+        result = {
+            "metrics": report["metrics"],
+            "ceilings": report["ceilings"],
+            "n_pairs": report["n_pairs"],
+        }
+    elif args.command == "phase1-convergence":
+        from .phase1_worm import convergence_test
+
+        report = convergence_test(args.project, args.output, columns=args.columns)
+        result = {
+            name: {"passed": report[name]["passed"], "checks": report[name]["checks"]}
+            for name in ("half_dt", "plus_two_compartments")
+        }
     elif args.command == "phase1-report":
         from .phase0 import load_registration
         from .phase1_worm import report as phase1_report
 
-        result = phase1_report(
+        report = phase1_report(
             args.project, load_registration(args.registration), args.output
         )
-        print(
-            json.dumps(
-                {
-                    split: value.get("acceptance", value)
-                    for split, value in result["splits"].items()
-                },
-                indent=2,
-                default=str,
-            )
-        )
+        result = {
+            split: value.get("acceptance", value)
+            for split, value in report["splits"].items()
+        }
     elif args.command == "phase0-run":
         from .phase0 import freeze_registration, load_registration
         from .phase0_worm import exploratory, render_report

@@ -75,19 +75,33 @@ to B0.
 
 ## Commands
 
-```bash
-molc phase1-fold --fold 0 --steps 30 --batch 4
-```
+| Command | What it does | Output (restricted, local) |
+|---|---|---|
+| `molc traces-ingest` | Converts the OSF trace export into per-event response windows | `data/worm/responses/` |
+| `molc phase1-audit` | Pre-training audit. Reads no targets. Reports the library, family recovery, K3, the resting state, and edges net-inhibitory at rest | `artifacts/phase1/audit.json` |
+| `molc phase1-convergence` | The Section 12.6 test on the untrained model: halve dt, then separately add two compartments | `artifacts/phase1/convergence.json` |
+| `molc phase1-fold --fold F` | Trains one frozen fold. Checkpoints after every step and resumes from a matching checkpoint | `artifacts/phase1/<split>-fold<F>.json`, `.ckpt` |
+| `molc phase1-report` | Refits B0, B1 and B2 on the same folds, pools held-out predictions, and reports metrics, ceilings, paired cluster bootstrap intervals (2,000 draws), the Section 9.3 verdict and the M10 residual analysis | `artifacts/phase1/phase1-report.json` |
+| `molc heldout-animals` | Exploratory (`pre_registered: false`). Phase 0 linear-response models fit on training animals and scored on held-out animals | `artifacts/phase1/held-out-animals.json` |
 
-Run all five `leave_class_out` folds, then:
+Run all five `leave_class_out` folds (for example
+`molc phase1-fold --split leave_class_out --fold 0 --steps 30 --batch 4`),
+then `molc phase1-report`. An interrupted fold resumes on rerun. A checkpoint
+written with different steps, batch, seed or learning rate is refused.
 
-```bash
-molc phase1-report
-```
+### Residual analysis
 
-`phase1-report` refits B0, B1 and B2 on the same folds and pools the compiler's
-held-out predictions. It then reports metrics, ceilings, paired cluster
-bootstrap intervals (2,000 draws) and the Section 9.3 verdict.
+Residuals are off in Phase 1, so the M10 analysis regresses held-out errors
+(observed − compiler) on per-pair features the model does not use:
+
+- `peptide_coupling`: released peptide × matched receptor × potency. Peptides
+  are off (K2).
+- `no_direct_connection`: neither a chemical synapse nor a gap junction joins
+  the pair.
+- `log_autoresponse`: a trend here means the drive gauge is inadequate.
+
+A feature is a candidate addition when its Bonferroni-corrected p-value is
+below 0.05.
 
 ## Trace ingestion
 
@@ -95,7 +109,7 @@ The traces are not needed for the pre-registered comparison. They are needed
 for the audit and the exploratory analyses:
 
 ```bash
-uv run python -c "from molecular_compiler.randi_traces import ingest; from molecular_compiler.provenance import DataRegister; ingest('data/cache', 'data/worm', DataRegister.load('data-register.json'))"
+uv run molc traces-ingest
 ```
 
 This writes `data/worm/responses/{wt,unc31}.npz` and an ingestion report.
@@ -115,21 +129,31 @@ values are in `data-register.json`.
   gradient step takes about 140 s alone, or about 250–350 s with three folds
   sharing the CPU. The first step includes about 5 minutes of compilation.
 
+## Pre-training audit findings
+
+- **Family recovery (spec 10.2).**
+  - The pooled leave-one-out rate passes the 90% threshold. GPCRs dominate
+    that rate, and they recover almost perfectly.
+  - Ligand-gated receptors are below 90%, at about 85%, and transporters are
+    about 71%.
+  - The anion-receptor families that decide sign are weakest: GABA_anion
+    about 50%, GluCl_anion about 67%, ACh_anion about 83%.
+  - So PLM neighbors must not replace curated labels for receptors (M5-R1
+    keeps labels first).
+- **Chloride bug, fixed.**
+  - The "neutral" non-chloride transporters were given a 10 mM chloride
+    equilibrium. That was neutral only while basal [Cl⁻]ᵢ was 10 mM. Once
+    basal was set to 5 mM, they pulled [Cl⁻]ᵢ back up.
+  - `build_worm_library` now sets them to the basal value it is given.
+  - Edges that are net-inhibitory at rest rose from under 1% to about 9%.
+  - The first fold launch used the bug, so its runs were discarded (logs in
+    `artifacts/phase1/obsolete/`).
+
 ## Run state (2026-10-06)
 
-- The five `leave_class_out` folds were launched three at a time (folds 0–2,
-  then 3–4) with `--steps 30 --batch 4`. Logs are in
-  `artifacts/phase1/logs/`.
-- Work was paused after the first training step of folds 0–2. The processes
-  were suspended with SIGSTOP, not killed, so `kill -CONT` on their PIDs
-  resumes them where they stopped.
-- If they are lost (reboot, app quit, kill), rerun the missing folds from the
-  start. The driver writes a fold's JSON only at the end and keeps no
-  mid-fold checkpoint.
-- Remaining: about 5 hours of compute for all five folds, then
-  `molc phase1-report`. `leave_neuron_out` folds are not scheduled.
-- Not yet done:
-  - the exploratory re-run of Phase 0 on the outlier-cleaned, trial-level data
-    with a held-out-animal split;
-  - the M10 residual analysis;
-  - the 90% family-recovery check on the curated library (spec 10.2).
+- No Phase 1 fold has completed. The first launch was discarded because of
+  the chloride bug above.
+- Folds should be relaunched with the current code. They now checkpoint after
+  every step, so a pause or kill loses at most one step.
+- Remaining: about 5 hours of compute for the five `leave_class_out` folds,
+  then `molc phase1-report`. `leave_neuron_out` folds are not scheduled.
