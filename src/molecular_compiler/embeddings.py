@@ -32,24 +32,30 @@ def pooled_embedding(sequence, residue_embedder, window=1022, stride=511):
     return (accumulation / counts[:, None]).mean(axis=0).astype(np.float16)
 
 
-def esm2_embedder(checkpoint=None):
+def esm2_embedder(checkpoint=None, device="cpu"):
     """Load real ESM-2 outside training. Download occurs only when invoked."""
+    import argparse
+
     import esm
     import torch
 
-    model, alphabet = (
-        esm.pretrained.load_model_and_alphabet_local(str(checkpoint))
-        if checkpoint
-        else esm.pretrained.esm2_t33_650M_UR50D()
-    )
-    model.eval()
+    # The fair-esm checkpoint stores its training arguments as a Namespace;
+    # allowlist only that class rather than disabling weights-only loading.
+    with torch.serialization.safe_globals([argparse.Namespace]):
+        model, alphabet = (
+            esm.pretrained.load_model_and_alphabet_local(str(checkpoint))
+            if checkpoint
+            else esm.pretrained.esm2_t33_650M_UR50D()
+        )
+    model.eval().to(device)
     converter = alphabet.get_batch_converter()
 
     def embed(fragment):
         _, _, tokens = converter([("protein", fragment)])
         with torch.no_grad():
-            result = model(tokens, repr_layers=[33], return_contacts=False)
-        return result["representations"][33][0, 1 : len(fragment) + 1].cpu().numpy()
+            result = model(tokens.to(device), repr_layers=[33], return_contacts=False)
+        residues = result["representations"][33][0, 1 : len(fragment) + 1]
+        return residues.float().cpu().numpy()
 
     return embed
 

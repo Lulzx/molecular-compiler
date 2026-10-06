@@ -1,1 +1,102 @@
-[]
+[
+  {
+    "dataset_id": "cook2019_hermaphrodite",
+    "species": "C. elegans",
+    "animal_id": "cook2019_herm_composite",
+    "source": "Cook et al. 2019, Nature 571:63-71, SI 5 adjacency matrices (corrected July 2020), via openworm/ConnectomeToolbox cect 0.3.5 data/",
+    "version": "SI5 corrected 2020-07",
+    "license": "No open license (Springer Nature terms); SI 5 states none. Use permitted; redistribution of derived data not granted",
+    "tier": "restricted",
+    "attribution": "Cook SJ et al. (2019) Whole-animal connectomes of both Caenorhabditis elegans sexes. Nature 571:63-71"
+  },
+  {
+    "dataset_id": "cect_c302_reference",
+    "species": "C. elegans",
+    "animal_id": "cook2019_herm_composite",
+    "source": "openworm/ConnectomeToolbox (cect) 0.3.5 Cook2019HermReader cache",
+    "version": "cect 0.3.5",
+    "license": "MIT (cect code); data derived from Cook et al. 2019 (restricted)",
+    "tier": "restricted",
+    "attribution": "Gleeson P et al. (2018) c302. Phil Trans R Soc B 373:20170379"
+  },
+  {
+    "dataset_id": "cengen_taylor2021",
+    "species": "C. elegans",
+    "animal_id": "cengen_population",
+    "source": "CeNGEN thresholded neuron-class TPM 021821 (Taylor et al. 2021, Cell 184:4329), via wormneuroatlas 0.0.7.3 data/cengen.h5",
+    "version": "021821 threshold 2",
+    "license": "Elsevier open-access user license (not CC); cengen.org states no data license. Redistribution not granted",
+    "tier": "restricted",
+    "attribution": "Taylor SR et al. (2021) Molecular topography of an entire nervous system. Cell 184:4329-4347"
+  },
+  {
+    "dataset_id": "beets2023_peptide_gpcr",
+    "species": "C. elegans",
+    "animal_id": "in_vitro",
+    "source": "Beets et al. 2023, Cell Reports 42:113058, media 6 (deorphanization EC50), via wormneuroatlas 0.0.7.3",
+    "version": "media 6",
+    "license": "CC BY-NC-ND 4.0 (article); no separate data license. Derived redistribution not granted",
+    "tier": "restricted",
+    "attribution": "Beets I et al. (2023) System-wide mapping of peptide-GPCR interactions in C. elegans. Cell Rep 42:113058"
+  },
+  {
+    "dataset_id": "fenyves2020_polarity",
+    "species": "C. elegans",
+    "animal_id": "literature",
+    "source": "Fenyves et al. 2020, PLoS Comput Biol 16:e1007974, S3 table, via wormneuroatlas 0.0.7.3",
+    "version": "S3",
+    "license": "CC BY 4.0 (article and supporting information)",
+    "tier": "open",
+    "attribution": "Fenyves BG, Szilagyi GS, Vassy Z, Soti C, Csermely P (2020) Synaptic polarity and sign-balance prediction using gene expression data in the C. elegans chemical synapse neuronal connectome network. PLoS Comput Biol 16:e1007974"
+  },
+  {
+    "dataset_id": "randi2023_signal_propagation",
+    "species": "C. elegans",
+    "animal_id": "randi2023_population",
+    "source": "Randi et al. 2023, Nature 623:406-414, funatlas.h5 (compiled 2023-06-28) via wormneuroatlas 0.0.7.3",
+    "version": "2023-06-28_19-52-14",
+    "license": "CC BY 4.0 (article, Nature 623:406); OSF node 10.17605/OSF.IO/E2SYT sets no separate data license",
+    "tier": "open",
+    "attribution": "Randi F, Sharma AK, Dvali S, Leifer AM (2023) Neural signal propagation atlas of Caenorhabditis elegans. Nature 623:406-414"
+  },
+  {
+    "dataset_id": "ripoll_sanchez2023_peptide_connectome",
+    "species": "C. elegans",
+    "animal_id": "literature",
+    "source": "Ripoll-Sanchez et al. 2023, Neuron 111:3570, long-range model (01022024 CSV) via cect 0.3.5",
+    "version": "01022024",
+    "license": "CC BY 4.0 (article; Figshare collection 10.6084/m9.figshare.c.6895870)",
+    "tier": "open",
+    "attribution": "Ripoll-Sanchez L et al. (2023) The neuropeptidergic connectome of C. elegans. Neuron 111:3570-3589"
+  },
+  {
+    "dataset_id": "wormbase_ws286",
+    "species": "C. elegans",
+    "animal_id": "reference_genome",
+    "source": "WormBase WS286 c_elegans.PRJNA13758.WS286.geneIDs.txt via wormneuroatlas 0.0.7.3",
+    "version": "WS286",
+    "license": "No license verified for this release file; treated as restricted",
+    "tier": "restricted",
+    "attribution": "WormBase (Davis P et al. 2022, Genetics 220:iyac003)"
+  },
+  {
+    "dataset_id": "uniprot_celegans",
+    "species": "C. elegans",
+    "animal_id": "reference_proteome",
+    "source": "UniProtKB REST API (rest.uniprot.org), organism 6239, canonical and isoform sequences",
+    "version": "release recorded in ingestion report",
+    "license": "CC BY 4.0",
+    "tier": "open",
+    "attribution": "The UniProt Consortium (2025) UniProt: the Universal Protein Knowledgebase. Nucleic Acids Res"
+  },
+  {
+    "dataset_id": "esm2_t33_650M_UR50D",
+    "species": "C. elegans",
+    "animal_id": "model_weights",
+    "source": "fair-esm esm2_t33_650M_UR50D.pt, sha256 ea9d0522b335a8778dea6535a65301f10208dece28cd5865482b0b1fc446168c",
+    "version": "esm2_t33_650M_UR50D",
+    "license": "MIT",
+    "tier": "open",
+    "attribution": "Lin Z et al. (2023) Evolutionary-scale prediction of atomic-level protein structure with a language model. Science 379:1123-1130"
+  }
+]

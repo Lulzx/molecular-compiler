@@ -41,6 +41,29 @@ def main():
         "rank", help="chemical/contact/implicit-peptide design rank"
     )
     analysis.add_argument("directory")
+    ingest = sub.add_parser(
+        "worm-ingest", help="convert registered public worm sources (Phase 0)"
+    )
+    ingest.add_argument("--cache", default="data/cache")
+    ingest.add_argument("--output", default="data/worm")
+    ingest.add_argument("--register", default="data-register.json")
+    ingest.add_argument("--checkpoint-hash")
+    ingest.add_argument("--device", default="cpu")
+    register = sub.add_parser(
+        "phase0-register", help="freeze the Stage A pre-registration"
+    )
+    register.add_argument("--project", default="data/worm")
+    register.add_argument("--output", default="configs/phase0-stage-a.json")
+    phase0 = sub.add_parser("phase0-run", help="run every Phase 0 analysis")
+    phase0.add_argument("--project", default="data/worm")
+    phase0.add_argument("--registration", default="configs/phase0-stage-a.json")
+    phase0.add_argument("--output", default="artifacts/phase0")
+    phase0.add_argument("--steps", type=int, default=1500)
+    phase0.add_argument(
+        "--ripoll",
+        default="data/cache/cect/cect/data/"
+        "01022024_neuropeptide_connectome_long_range_model.csv",
+    )
     args = parser.parse_args()
     if args.command == "demo":
         result = run(args.output, args.training_steps)
@@ -53,6 +76,47 @@ def main():
         graph, _, kinetics = synthetic_system()
         export_project(graph, kinetics, args.directory)
         result = {"directory": args.directory, "data_kind": "synthetic"}
+    elif args.command == "worm-ingest":
+        from .provenance import DataRegister
+        from .worm_public import build_worm_project
+
+        _, report = build_worm_project(
+            args.cache,
+            args.output,
+            DataRegister.load(args.register),
+            checkpoint_hash=args.checkpoint_hash,
+            device=args.device,
+        )
+        result = {
+            k: v
+            for k, v in report.items()
+            if k not in ("register", "provenance", "declared_approximations")
+        }
+    elif args.command == "phase0-register":
+        from .phase0 import freeze_registration
+        from .phase0_worm import stage_a
+
+        manifest = json.loads((Path(args.project) / "manifest.json").read_text())
+        result = {
+            "path": args.output,
+            "processing_hash": freeze_registration(args.output, stage_a(manifest)),
+        }
+    elif args.command == "phase0-run":
+        from .phase0 import load_registration
+        from .phase0_worm import run as run_phase0
+
+        report = run_phase0(
+            args.project,
+            load_registration(args.registration),
+            args.output,
+            steps=args.steps,
+            ripoll_csv=args.ripoll,
+        )
+        result = {
+            k: report[k]
+            for k in ("K1", "K2", "K3", "stage_b", "elapsed_s")
+            if k in report
+        }
     elif args.command == "rank":
         graph, _ = load_project(args.directory)
         result = molecular_design(graph)

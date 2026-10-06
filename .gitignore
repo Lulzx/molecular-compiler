@@ -5,3 +5,5 @@ __pycache__/
 *.egg-info/
 artifacts/
 dist/
+data/cache/
+data/worm/
