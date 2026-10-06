@@ -1,6 +1,6 @@
 # molecular-compiler
 
-A Python/JAX reference implementation of [spec.md](spec.md), revision 8.
+A Python/JAX reference implementation of [spec.md](spec.md), revision 9.
 It prepares registered connectome and molecular data, compiles compositional
 molecular rules into a simulation, and differentiates through simulation and
 calcium observation. It includes held-out evaluation, feasibility analyses,
@@ -9,7 +9,10 @@ experiment ranking, and body and distributed-solver interfaces.
 The software is runnable. Scientific acceptance on animal data is **not yet
 established**. The bundled demonstrations are synthetic. Phase 0 has been run
 on public worm data (spec Section 10.2; procedure in [docs/phase0.md](docs/phase0.md)),
-but its numerical report stays local because some inputs are restricted. See
+but its numerical report stays local because some inputs are restricted.
+Phase 1 (the full compiled model on the same frozen comparison) is in
+progress: spec Section 10.3, procedure and run state in
+[docs/phase1.md](docs/phase1.md). See
 [implementation status](docs/implementation.md) for the requirement map,
 numerical evidence, and remaining delivery gates.
 
@@ -44,6 +47,13 @@ see [docs/phase0.md](docs/phase0.md)):
 uv sync --locked --extra phase0 --extra embeddings
 uv run molc worm-ingest --checkpoint-hash <esm2 sha256> --device mps
 uv run molc phase0-run   # Stage A is already frozen in configs/
+```
+
+Phase 1 (full compiled model; see [docs/phase1.md](docs/phase1.md)):
+
+```sh
+uv run molc phase1-fold --split leave_class_out --fold 0 --steps 30 --batch 4
+uv run molc phase1-report   # after all five folds are written
 ```
 
 ESM-2 weights are loaded only when `esm2_embedder` is explicitly invoked.

@@ -88,3 +88,48 @@ molc phase1-report
 `phase1-report` refits B0, B1 and B2 on the same folds and pools the compiler's
 held-out predictions. It then reports metrics, ceilings, paired cluster
 bootstrap intervals (2,000 draws) and the Section 9.3 verdict.
+
+## Trace ingestion
+
+The traces are not needed for the pre-registered comparison. They are needed
+for the audit and the exploratory analyses:
+
+```bash
+uv run python -c "from molecular_compiler.randi_traces import ingest; from molecular_compiler.provenance import DataRegister; ingest('data/cache', 'data/worm', DataRegister.load('data-register.json'))"
+```
+
+This writes `data/worm/responses/{wt,unc31}.npz` and an ingestion report.
+The OSF archives are expected, already extracted, under
+`data/cache/randi/exported_data` and `exported_data_unc31`. Their SHA-256
+values are in `data-register.json`.
+
+## Memory
+
+- A reverse-mode gradient through a 3,050-step response window would store
+  the full simulator state at every step. The per-edge synaptic state alone is
+  3,709 edges × 97 receptors in float64.
+- With per-step checkpointing only, a 4-column batch needed about 45 GB per
+  process.
+- The driver therefore checkpoints at two levels: segments of 50 steps, then
+  steps inside each segment. Peak memory is about 4 GB per process. A 4-column
+  gradient step takes about 140 s alone, or about 250–350 s with three folds
+  sharing the CPU. The first step includes about 5 minutes of compilation.
+
+## Run state (2026-10-06)
+
+- The five `leave_class_out` folds were launched three at a time (folds 0–2,
+  then 3–4) with `--steps 30 --batch 4`. Logs are in
+  `artifacts/phase1/logs/`.
+- Work was paused after the first training step of folds 0–2. The processes
+  were suspended with SIGSTOP, not killed, so `kill -CONT` on their PIDs
+  resumes them where they stopped.
+- If they are lost (reboot, app quit, kill), rerun the missing folds from the
+  start. The driver writes a fold's JSON only at the end and keeps no
+  mid-fold checkpoint.
+- Remaining: about 5 hours of compute for all five folds, then
+  `molc phase1-report`. `leave_neuron_out` folds are not scheduled.
+- Not yet done:
+  - the exploratory re-run of Phase 0 on the outlier-cleaned, trial-level data
+    with a held-out-animal split;
+  - the M10 residual analysis;
+  - the 90% family-recovery check on the curated library (spec 10.2).

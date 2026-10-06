@@ -1,6 +1,6 @@
 # Implementation and acceptance status
 
-This repository implements an executable reference system for revision 8 of
+This repository implements an executable reference system for revision 9 of
 `spec.md`. Software tests and synthetic demonstrations establish numerical and
 API behavior and satisfy the initial reference-software scope in Section 1.6.
 They do not establish the scientific exits in Section 10.
@@ -57,6 +57,8 @@ are tested. NWB tests skip only when the optional dependency is absent.
 
 ## Phase 0 and scientific gates
 
+Phase 1 is in progress: see [phase1.md](phase1.md) and spec Section 10.3 (Revision 9). The full compiled model is trained per fold on the frozen Phase 0 comparison. No Phase 1 result exists yet.
+
 Phase 0 has been run on public worm data. The procedure is in [phase0.md](phase0.md), and the resulting design changes are in spec Section 10.2 (Revision 8). The numerical report inherits the `restricted` tier of its CeNGEN, Cook, Beets and WormBase inputs, so it stays local in `artifacts/phase0/`.
 
 Status of the eight Phase 0 items:
@@ -66,7 +68,7 @@ Status of the eight Phase 0 items:
 3. **ESM-2 family recovery.** Run; it fails on nomenclature families. No curated kinetics library exists yet, and molecule priors still need measured sources.
 4. **Jaxley.** Capability audit done; the in-house backend is selected. The single-cell trajectory and gradient comparison passes.
 5. **B5.** Reimplemented as an anatomy-constrained linear response and compared qualitatively with Creamer et al. The published held-out-animal split cannot be reproduced from the pooled atlas.
-6. **Not done.** Ensemble training through the curriculum and the window and timestep/compartment convergence tests are Phase 1. They need raw whole-brain traces and a kinetics library.
+6. **Partly done in Phase 1.** Raw Randi traces are ingested, and a curated kinetics library exists. A timestep check on the worm graph selected dt = 10 ms with one compartment; this deviates from the Section 12.6 test as written (spec 10.3). Ensemble training through the full curriculum is not run, because it costs too much on CPU.
 7. **Partly done.** B0/B1/B2/B4/B5 were evaluated on held-out neurons and classes for detection, sign and amplitude, using the linear-response approximation. State conditions, latency and residual analysis need traces.
 8. **Not done.** Ensemble coverage and the Laplace fallback are Phase 1.
 
