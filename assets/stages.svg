@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 200" width="1280" height="200" role="img" aria-label="Prepare, Compile, Run, Learn, Decide">
+<defs><style>.t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.s{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}.c{animation:pulse 5s ease-in-out infinite}@keyframes pulse{0%,100%{stroke-opacity:.35}10%{stroke-opacity:1}20%{stroke-opacity:.35}}.a{stroke-dasharray:4 6;animation:flow 1.2s linear infinite}@keyframes flow{to{stroke-dashoffset:-20}}</style></defs>
+<rect width="1280" height="200" rx="16" fill="#0b1024"/>
+<rect class="c" style="animation-delay:0s" x="20.0" y="24" width="220" height="152" rx="12" fill="#11183a" stroke="#5eead4" stroke-width="1.5"/>
+<rect x="34.0" y="22" width="192" height="4" rx="2" fill="#5eead4"/>
+<text x="38.0" y="64" class="t" font-size="13" fill="#5eead4" opacity=".8">01</text>
+<text x="38.0" y="94" class="t" font-size="24" font-weight="700" fill="#e2e8f0">PREPARE</text>
+<text x="38.0" y="117" class="t" font-size="13" fill="#5eead4">M1–M3</text>
+<text x="38.0" y="142" class="s" font-size="14" fill="#94a3b8">harmonize data,</text>
+<text x="38.0" y="161" class="s" font-size="14" fill="#94a3b8">infer identities</text>
+<line class="a" x1="244.0" y1="100" x2="265.0" y2="100" stroke="#475569" stroke-width="2"/>
+<path d="M263.0,95 L271.0,100 L263.0,105" fill="none" stroke="#475569" stroke-width="2"/>
+<rect class="c" style="animation-delay:1s" x="275.0" y="24" width="220" height="152" rx="12" fill="#11183a" stroke="#60a5fa" stroke-width="1.5"/>
+<rect x="289.0" y="22" width="192" height="4" rx="2" fill="#60a5fa"/>
+<text x="293.0" y="64" class="t" font-size="13" fill="#60a5fa" opacity=".8">02</text>
+<text x="293.0" y="94" class="t" font-size="24" font-weight="700" fill="#e2e8f0">COMPILE</text>
+<text x="293.0" y="117" class="t" font-size="13" fill="#60a5fa">M4–M7</text>
+<text x="293.0" y="142" class="s" font-size="14" fill="#94a3b8">rules × kinetics</text>
+<text x="293.0" y="161" class="s" font-size="14" fill="#94a3b8">→ SimGraph</text>
+<line class="a" x1="499.0" y1="100" x2="520.0" y2="100" stroke="#475569" stroke-width="2"/>
+<path d="M518.0,95 L526.0,100 L518.0,105" fill="none" stroke="#475569" stroke-width="2"/>
+<rect class="c" style="animation-delay:2s" x="530.0" y="24" width="220" height="152" rx="12" fill="#11183a" stroke="#a78bfa" stroke-width="1.5"/>
+<rect x="544.0" y="22" width="192" height="4" rx="2" fill="#a78bfa"/>
+<text x="548.0" y="64" class="t" font-size="13" fill="#a78bfa" opacity=".8">03</text>
+<text x="548.0" y="94" class="t" font-size="24" font-weight="700" fill="#e2e8f0">RUN</text>
+<text x="548.0" y="117" class="t" font-size="13" fill="#a78bfa">M8 · M9 · M13</text>
+<text x="548.0" y="142" class="s" font-size="14" fill="#94a3b8">differentiable</text>
+<text x="548.0" y="161" class="s" font-size="14" fill="#94a3b8">simulation</text>
+<line class="a" x1="754.0" y1="100" x2="775.0" y2="100" stroke="#475569" stroke-width="2"/>
+<path d="M773.0,95 L781.0,100 L773.0,105" fill="none" stroke="#475569" stroke-width="2"/>
+<rect class="c" style="animation-delay:3s" x="785.0" y="24" width="220" height="152" rx="12" fill="#11183a" stroke="#f472b6" stroke-width="1.5"/>
+<rect x="799.0" y="22" width="192" height="4" rx="2" fill="#f472b6"/>
+<text x="803.0" y="64" class="t" font-size="13" fill="#f472b6" opacity=".8">04</text>
+<text x="803.0" y="94" class="t" font-size="24" font-weight="700" fill="#e2e8f0">LEARN</text>
+<text x="803.0" y="117" class="t" font-size="13" fill="#f472b6">M10</text>
+<text x="803.0" y="142" class="s" font-size="14" fill="#94a3b8">fit rules to</text>
+<text x="803.0" y="161" class="s" font-size="14" fill="#94a3b8">activity</text>
+<line class="a" x1="1009.0" y1="100" x2="1030.0" y2="100" stroke="#475569" stroke-width="2"/>
+<path d="M1028.0,95 L1036.0,100 L1028.0,105" fill="none" stroke="#475569" stroke-width="2"/>
+<rect class="c" style="animation-delay:4s" x="1040.0" y="24" width="220" height="152" rx="12" fill="#11183a" stroke="#fbbf24" stroke-width="1.5"/>
+<rect x="1054.0" y="22" width="192" height="4" rx="2" fill="#fbbf24"/>
+<text x="1058.0" y="64" class="t" font-size="13" fill="#fbbf24" opacity=".8">05</text>
+<text x="1058.0" y="94" class="t" font-size="24" font-weight="700" fill="#e2e8f0">DECIDE</text>
+<text x="1058.0" y="117" class="t" font-size="13" fill="#fbbf24">M11 · M12</text>
+<text x="1058.0" y="142" class="s" font-size="14" fill="#94a3b8">evaluate, rank</text>
+<text x="1058.0" y="161" class="s" font-size="14" fill="#94a3b8">next experiments</text>
+</svg>
