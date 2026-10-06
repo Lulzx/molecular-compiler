@@ -1,0 +1,47 @@
+[project]
+name = "molecular-compiler"
+version = "0.1.0"
+description = "Differentiable molecular rules and connectome compiler for neural simulation"
+readme = "README.md"
+authors = [
+    { name = "lulzx", email = "wiserishabh@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.11.2",
+    "jaxley>=0.14.0",
+    "jsonschema>=4.26.0",
+    "numpy>=2.5.3",
+    "optax>=0.2.8",
+    "pot>=0.9.7.post1",
+    "pyarrow>=25.0.1",
+    "pyyaml>=6.0.3",
+    "safetensors>=0.8.0",
+    "scipy>=1.18.1",
+    "zarr>=3.4.0",
+]
+
+[project.optional-dependencies]
+nwb = [
+    "pynwb>=4.2.0",
+]
+embeddings = [
+    "fair-esm>=2.0.0",
+    "torch>=2.14.1",
+]
+
+[project.scripts]
+molecular-compiler = "molecular_compiler.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+extend-exclude = ["spec.md"]

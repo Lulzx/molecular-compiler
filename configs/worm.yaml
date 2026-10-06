@@ -1,0 +1,13 @@
+species: C. elegans
+seed: 0
+duration_s: 0.01
+mode: sequential
+resolution:
+  dt_s: 0.0005
+  n_comp: 3
+  solver: auto
+  solve_tolerance: 1.0e-05
+observation:
+  indicator: GCaMP6s
+  noise_sd: 0.01
+  half_saturation: 0.001

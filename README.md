@@ -1,123 +1,148 @@
 # molecular-compiler
 
-A research framework for compiling connectomes and molecular profiles into
-executable nervous-system models.
+A Python/JAX reference implementation of [spec.md](spec.md), revision 7.
+It prepares registered connectome and molecular data, compiles compositional
+molecular rules into a simulation, and differentiates through simulation and
+calcium observation. It includes held-out evaluation, feasibility analyses,
+experiment ranking, and body and distributed-solver interfaces.
 
-The compiler takes the wiring of a nervous system (a connectome) and the
-molecular makeup of its neurons (gene expression, protein measurements, ion
-channel kinetics) and produces a differentiable simulation. The goal is a
-simulation whose spontaneous activity, stimulus responses and responses to
-single-neuron stimulation match the real animal, without fitting each animal
-separately.
+The software is runnable. Scientific acceptance on animal data is **not yet
+established**. The included datasets and demonstrations are explicitly
+synthetic. See [implementation status](docs/implementation.md) for the
+requirement map, numerical evidence, and remaining delivery gates.
 
-What is learned is a set of rules that map molecules to parameters: how a
-given channel, receptor or gap junction protein becomes a conductance. The
-same rules apply to every neuron, every animal and, if the approach works,
-every species.
+## Run
 
-There is no code yet. The design is in [spec.md](spec.md).
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
-## Pipeline
-
-```
-connectome ─┐
-expression ─┼─> prepare ──> compile ──> run ──> observe ──> losses
-proteins   ─┘   (M1-M3)     (M4-M7)     (M8)    (M9)        (M10)
-                             ^   ^                            │
-kinetics ────────────────────┘   └──────── gradients ─────────┘
+```sh
+uv sync --locked
+uv run molecular-compiler demo --training-steps 10
+uv run molecular-compiler benchmark --sizes 8 32 128 --repeats 10
+uv run pytest -q
 ```
 
-- prepare: load and validate the data, then assign each neuron a
-  probability distribution over molecular identity.
-- compile: apply the learned rules to get channel densities, receptor
-  densities, gap junctions and neuropeptide coupling, then reduce each neuron
-  type to a fast surrogate model. Types that no surrogate fits run the full
-  model.
-- run: integrate the network. Voltages coupled by gap junctions are solved
-  as one sparse linear system each step.
-- observe: convert simulated calcium into predicted fluorescence.
-- M11 ranks the next experiments to run. M12 scores the model on held-out
-  data. M13 couples the simulation to a body model.
+The demo writes `artifacts/demo/report.json` and a trajectory archive. It runs
+prepare → compile → simulate → observe, then optimizes molecular rule weights
+through that full JAX program. The benchmark separates total step, backward
+step, synaptic accumulation, and voltage-solve costs, including solver residuals
+and iteration counts.
 
-## Targets
+Install optional interchange or preprocessing dependencies when needed:
 
-| | System | Neurons | Synapses |
-|:-:|---|--:|--:|
-| 🪱 | C. elegans | 302 | thousands |
-| 🪰 | Drosophila optic lobe | ~53,000 | millions |
-| 🪰 | Drosophila whole brain | 139,255 | ~50 million |
-| 🐟 | Larval zebrafish | ~100,000 | unknown |
-| 🐭 | Mouse | ~70 million | ~10^11 |
+```sh
+uv sync --locked --extra nwb
+uv sync --locked --extra embeddings
+```
 
-The worm is used for training and validation. The fly is the first transfer
-target.
+ESM-2 weights are loaded only when `esm2_embedder` is explicitly invoked.
+Embeddings stay outside the gradient path. Long proteins use 1,022-residue
+windows with stride 511; overlapping residue representations are averaged
+before final pooling. Canonical sequences and isoforms are embedded separately.
 
-## Evaluation
+## Python API
 
-Results are reported on held-out neurons, neuron classes, internal states and
-species, with all per-animal correction terms switched off. The compiler has
-to beat three baselines on held-out neuron classes:
+```python
+from molecular_compiler import (
+    ObservationModel,
+    Stimulus,
+    compile,
+    observe,
+    simulate,
+)
+from molecular_compiler.fixtures import synthetic_system
 
-- B0: connectome only, with weights from synapse counts and sign from the
-  predicted neurotransmitter.
-- B1: the same inputs fed to an unstructured network.
-- B2: a model trained on the recordings with no anatomy.
+# Synthetic fixture; replace with registered animal inputs for research.
+graph, rules, kinetics = synthetic_system()
+sim = compile(graph, rules, kinetics)
+trajectory = simulate(
+    sim,
+    Stimulus(pulses=((0, 0.001, 0.006, 5.0),)),  # pA, seconds
+    duration_s=0.01,
+)
+recording = observe(trajectory, ObservationModel())
+```
 
-Three more baselines are always reported but don't decide acceptance: the
-compiler without neuropeptide signaling, a connectome-constrained model fit
-to activity, and, for the fly optic lobe, a task-trained connectome model.
+The six public interfaces are `prepare`, `compile`, `simulate`, `observe`,
+`evaluate`, and `propose_experiments`. `attach_residuals` explicitly enables
+within-animal corrections and recompiles identity deviations before linking.
+Headline evaluation recompiles without those corrections or species adapters.
 
-Before any of this, a feasibility phase tests whether the approach can work
-at all. It checks how many independent directions the molecular data
-contains, whether neuropeptide signaling outside synapses is needed, how many
-synapse signs depend on poorly measured chloride levels, and whether the
-held-out classes are actually new or just interpolations.
+`RuleNetwork.initialize` provides independently trainable dense heads.
+`RuleNetwork.initialize_compact` provides a frozen protein/set-encoder basis
+with two tied learned head coefficients for small budgets. Both architectures
+have parameter counts independent of neuron count. A supplied absolute
+`max_parameters` budget is enforced and requires a completed gauge audit; the
+synthetic demo's unrestricted network is not a frozen Phase 1 architecture.
 
-## Related work
+## Registered inputs
 
-The closest existing project is flyvis, which fits a fly visual system model
-on top of the connectome but learns parameters per cell type and uses no
-molecular data. Jaxley, a differentiable multicompartment simulator in JAX,
-will run the full neuron models and serve as the numerical reference. As far
-as we found, no existing model learns per-molecule rules that transfer across
-species, simulates neuropeptide signaling that doesn't follow the wiring, or
-lets synapse sign emerge from reversal potentials. Section 1.5 of the spec
-has the full comparison.
+Canonical projects contain:
 
-## Stack
+- `manifest.json`, with connectome, molecular and kinetics dataset IDs,
+  transmitter release/receptor mappings, and optional c302 cross-check evidence.
+- `data-register.json`, with source, version, species, animal, license,
+  attribution and `open` / `restricted` / `excluded` tier for every input.
+- `neurons.parquet`, `synapses.parquet`, `contacts.parquet`, `genes.parquet`,
+  `expression.parquet`, and `peptide_receptor_pairs.parquet`.
+- `kinetics.json`, with molecule priors, covariance, ion selectivity, kinetics,
+  sources and optional transporter equilibria.
 
-Python and JAX. Rules, simulator and training form one differentiable
-program. Native kernels will be added only where profiling at fly scale
-shows they are needed.
+Parquet fields and units are validated against the specification. Unregistered
+or excluded inputs are rejected. Restricted inputs propagate their tier into
+compiled graphs, checkpoints and reports. Publication helpers require open data.
+The repository's [data register](data-register.json) starts empty; generated
+fixtures create their own clearly labeled register.
 
-## Design decisions
+A complete file-based workflow can be exercised without animal data:
 
-Section 12 of the spec records the main choices, with the reason for each
-and the result that would reopen it:
+```sh
+uv run molecular-compiler export-fixture artifacts/input
+uv run molecular-compiler rank artifacts/input
+```
 
-- Genes are represented by ESM-2 650M protein embeddings, computed once
-  before training.
-- Each neuron type gets a simple fixed ODE surrogate if one fits, a small
-  neural ODE if not, and the full model otherwise.
-- Uncertainty comes from an ensemble of 5 models. It counts as calibrated
-  only after a coverage test on held-out data passes; until then it is
-  reported as a sensitivity probe.
-- At fly scale, the voltage solve uses conjugate gradient with one
-  preconditioner block per neuron.
-- In the worm, neuropeptide coupling has no distance limit. In the fly and
-  larger brains, it falls off with a learned decay length.
-- The default timestep is 0.5 ms for the worm, 0.1 ms for the fly and
-  0.05 ms for zebrafish, each confirmed by a convergence test.
-- The rule network sees each neuron's molecules only, not its neighbors in
-  the connectome.
-- Every dataset is entered in a data register with its license before use.
-  Published models are trained only on data that can be redistributed.
+Copy `configs/worm.yaml`, set `input_directory: artifacts/input` and
+`output_directory: artifacts/run`, then run:
 
-## Status
+```sh
+uv run molecular-compiler run your-config.yaml
+```
 
-Specification only (revision 6). See [spec.md](spec.md) for modules, data
-schemas, training, evaluation, phases and references.
+YAML is validated against a strict JSON Schema. Recordings use Zarr with units
+and provenance; NWB interchange is available through the `nwb` extra. Rules use
+checksummed safetensors checkpoints, including any frozen basis.
+
+## Numerics and evaluation
+
+Voltages use mV, capacitance pF, conductance nS, current pA, and integration time
+ms internally. The public API and kinetic time constants use seconds. Gating,
+binding and STP use exponential updates. Gap junctions and axial compartments
+participate in the same implicit voltage solve. Small graphs use dense Cholesky;
+large graphs use matrix-free PCG with per-neuron block-Jacobi preconditioning.
+Gradients use implicit adjoint solves. Two-level overlapping additive Schwarz
+is available when profiling calls for stronger preconditioning.
+
+Worm defaults are graded release, 0.5 ms and three compartments. Fly and
+zebrafish defaults select spike release. `event` mode traverses only the
+outgoing synapses of neurons that cross the spike threshold, while decaying
+aggregated receptor conductances analytically. For graded release it uses the
+reference update. Experimental `parallel` mode uses time-parallel waveform
+iteration and falls back to the sequential reference when it does not converge.
+It is not an implementation of DEER.
+
+Peptides do not require anatomical edges. Coupling is factorized by ligand and
+cognate receptor, with each pair's own GPCR kinetics. Worm coupling is global;
+other species use a periodic screened-diffusion grid. Neuropeptide ligand
+embeddings are excluded from the transferable neuron encoder; species-native
+ligand/receptor pairing and receptor tokens determine the coupling.
+
+Evaluation checks whole-class holdouts, scores only selected held-out neurons,
+reports raw values, units, sign ambiguity and wired-path groups, normalizes
+available metrics by pre-registered reliability scales, and gates acceptance against B0, B1 and B2 with paired
+class/neuron bootstrap intervals. Missing baselines, ceilings, frozen budgets, gauge audits
+or real data keep the report unaccepted. B4 is executable; B0/B1/B2/B5 reference
+implementations and separate-job B6/fly-B0 artifact adapters are provided.
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0 for code. Input data retain their own licenses. See [LICENSE](LICENSE).

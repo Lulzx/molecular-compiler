@@ -2,7 +2,7 @@
 
 *Engineering specification for the system described in "A Molecular Compiler for Whole-Brain Emulation." The framework document explains why each design choice is made; this document specifies what to build.*
 
-*Revision 6 (2026-10-06): incorporates an external technical review, a literature check of every reference, the implementation-stack decision, decisions on every previously open item (Section 12), a survey of related projects (Section 1.5), and a Phase 0 trial of Jaxley as the worm simulator backend (Section 7.3). See [Revision history](#14-revision-history).*
+*Revision 7 (2026-10-06): adds a bounded reference-software deliverable, separates software conformance from animal-data acceptance, corrects the use of input rank as a parameter-count bound, specifies experimental waveform iteration honestly, and makes numerical, data, surrogate, and scale boundaries explicit. The scientific milestones remain in Section 10. See [Revision history](#14-revision-history).*
 
 ---
 
@@ -45,7 +45,7 @@ Only two learned components are allowed to transfer between animals and species:
 |---|---|
 | G1 | Compile a runnable simulation from connectome + molecular data, with no per-animal functional fitting required |
 | G2 | Learned rule parameters independent of neuron count $N$ |
-| G3 | Simulation cost linear in $N$ and synapse count per timestep |
+| G3 | Local dynamics and synaptic work linear in $N$ and synapse count per timestep; voltage-solve cost and iteration count measured separately |
 | G4 | Transfer across species with zero-shot or few-shot functional data |
 | G5 | Predict state-conditioned responses to single-neuron perturbation on held-out neurons and neuron classes |
 | G6 | Output ranked recommendations for the next experiments (stimulation targets, mutants, ExM panels) |
@@ -90,6 +90,14 @@ The projects below are the closest existing work, checked on 2026-10-06 against 
 2. **Structural masking with protein-language-model gene tokens**, so the same rules can be applied to a new species (M4-R3, Section 12.1).
 3. **A peptidergic pathway inside a simulator that does not follow wiring.** Ripoll-Sánchez et al. (2023) built the neuropeptide network as a graph; it has not been simulated as a dynamic pathway alongside synapses (M4-R5).
 4. **Sign that emerges from reversal potential and voltage**, with a chloride sign audit (M6-R1, M6-R3). Existing whole-brain models fix sign from the transmitter.
+
+### 1.6 Initial reference-software deliverable
+
+The first completed engineering deliverable is **a validated, executable reference implementation**, not completion of the animal-data research programme. It must provide the six Section 7 APIs, canonical registered-data ingestion and artifact interchange, compositional molecular heads, shared kinetic models, a differentiable coupled voltage solve and observation model, training/analysis utilities, held-out evaluation with honest missing-gate reports, and experiment ranking. A synthetic fixture exercises the complete pipeline and optimizer; it is always labeled synthetic.
+
+The reference release exits when its requirement-linked tests, lint/format checks, CLI demonstration, file-based ingestion/run workflow, and measured synthetic benchmark pass. Its numerical suite must include implicit-solve finite differences, float32/float64 comparisons, permutation/masking checks, sequential/event/experimental-parallel agreement, and a Jaxley single-cell trajectory/gradient comparison. Missing real-data evidence must prevent scientific acceptance rather than prevent numerical/software testing.
+
+The reference can use full kinetics for every molecular type, path-distance-based compartment bins instead of arbitrary skeleton reconstruction, and global computation outside an experimental distributed voltage solver. Fast surrogate execution, complete morphology reduction, external animal body backends, fly baselines, and multi-host neural/synaptic-state partitioning are later deliveries. Their absence must be stated in the release report. The scientific G1/G4/G5 claim still requires the Phase 0 and Phase 1 gates below.
 
 ---
 
@@ -418,7 +426,7 @@ Each module lists its purpose, inputs, outputs, method, and requirements. Requir
 | Neuromodulation (slow) | Release rates, sensitivity $R(z_i)$, effector map $\eta(z_i)$ onto signaling state $m_i$ | Masked by peptide / GPCR / effector expression |
 | Short-term plasticity | $U, \tau_{\text{rec}}, \tau_{\text{fac}}$ per synapse | Bounded by sigmoid to physiological ranges |
 
-**Peptidergic pathway.** Randi et al. (2023) found that signal propagation in the worm head departs from anatomical predictions, and that dense-core-vesicle-dependent signaling produces acute calcium responses (seconds or faster) between neurons with no wired connection, where the relevant peptides and receptors are expressed. The peptidergic head represents this directly: neuron $j$ releases peptide $\pi$ in proportion to $p_{j\pi}\, g_\pi(x_j)$, and neuron $i$ responds through receptor kinetics from M5 scaled by $q_{i\pi}$, **whether or not a synapse $j \to i$ exists**. Receptor kinetics are taken from the GPCR's M5 record, not fixed to a slow timescale. The spatial kernel is fixed per species (Section 12.5): none (the long-range variant of Ripoll-Sánchez et al. 2023) for *C. elegans*, and a learned decay length $\ell$ via grid mode for *Drosophila* and larger systems.
+**Peptidergic pathway.** Randi et al. (2023) found that signal propagation in the worm head departs from anatomical predictions, and that dense-core-vesicle-dependent signaling produces acute calcium responses (seconds or faster) between neurons with no wired connection, where the relevant peptides and receptors are expressed. The peptidergic head represents this directly: neuron $j$ releases peptide $\pi$ in proportion to $p_{j\pi}\, g_\pi(x_j)$, and neuron $i$ responds through receptor kinetics from M5 scaled by $q_{i\pi}$, **whether or not a synapse $j \to i$ exists**. Receptor kinetics are taken from the GPCR's M5 record, not fixed to a slow timescale. The spatial kernel family is fixed per species (Section 12.5); the reference grid uses a periodic screened-diffusion kernel, and records its extent, spacing and boundary condition. Its decay length is an explicit differentiable species parameter. The default families are: none (the long-range variant of Ripoll-Sánchez et al. 2023) for *C. elegans*, and a learned decay length $\ell$ via grid mode for *Drosophila* and larger systems.
 
 The slow neuromodulation head and its $k$-dimensional signaling state $m_i$ are kept for state changes over minutes, such as fed vs. starved.
 
@@ -427,11 +435,11 @@ Whether the peptidergic pathway is needed is an empirical question to settle in 
 5. **Species adapter.** Low-rank adapters on head weights, $W \to W + A_{\text{species}} B_{\text{species}}$ with rank $r_{\text{adapt}}$. Disabled for zero-shot evaluation.
 
 **Requirements.**
-- `M4-R1` Trainable parameter count (excluding adapters) is set from the Phase 0 rank analysis and must not exceed the configured fraction of $\text{rank}_\epsilon(X)$.
+- `M4-R1` Before animal-data training, freeze the architecture and an explicit **absolute trainable-parameter budget** (excluding adapters and frozen weights), chosen using the Phase 0 rank diagnostics and compositional-vs-black-box held-out ablations. Enforce that budget. The rank of the input matrix $X$ is a diagnostic of input collinearity, **not** a statistical upper bound on the parameter count or identifiability of a nonlinear rule network. A dense trainable PLM projection, a frozen projection, low-rank heads, and a compact tied-head model are distinct architectures and must be reported as such. Development runs without a frozen budget cannot clear scientific acceptance.
 - `M4-R2` Output is invariant to neuron permutation (tested).
 - `M4-R3` Masking is exact: an unexpressed molecule never receives nonzero density (tested).
 - `M4-R4` The network evaluates synapse-level heads only on existing edges; cost $\mathcal{O}(\text{nnz})$.
-- `M4-R5` Peptidergic heads are **not** restricted to anatomical edges. Their mask is (source expresses $\pi$) × (target expresses a receptor $r$ paired with $\pi$ in `peptide_receptor_pairs`). Cost is $\mathcal{O}(N \cdot P_\pi)$ through the factorized release/sensitivity form, never $\mathcal{O}(N^2)$.
+- `M4-R5` Peptidergic heads are **not** restricted to anatomical edges. Their mask is (source expresses $\pi$) × (target expresses a receptor $r$ paired with $\pi$ in `peptide_receptor_pairs`). Cost is $\mathcal{O}(N \cdot P_\mathrm{pair})$ through the factorized release/sensitivity form, never $\mathcal{O}(N^2)$, where $P_\mathrm{pair}$ counts the curated ligand–receptor kinetic channels. Receptors for the same ligand keep their own measured potency and time constants rather than averaging them into one kinetic model.
 - `M4-R6` Gene tokens for neuropeptide **ligands** are not assumed transferable across species. Neuropeptide families such as *flp* and *nlp* show lineage-specific expansion and limited one-to-one orthology. Conservation is clearer at the receptor level (Jékely 2013; Mirabeau & Joly 2013). For zero-shot transfer, peptidergic coupling is parameterized through receptor tokens, and ligand–receptor pairing comes from each species' own `peptide_receptor_pairs` table.
 
 ### M5. Kinetics Library
@@ -461,7 +469,7 @@ Whether the peptidergic pathway is needed is an empirical question to settle in 
 | **Outputs** | `SimGraph` (Section 7.2) |
 
 **Method.**
-1. **Compartment reduction.** Cluster each neuron's arbor into at most $n_{\text{comp}}$ electrotonic compartments. Membrane resistance $R_m$ comes from leak and resting conductances (M4/M5); axial resistance $R_a$ is a global parameter. Length constant $\lambda = \sqrt{R_m d / (4 R_a)}$. Each synapse gets attenuation $A_s = e^{-d_s/\lambda}$ to its compartment.
+1. **Compartment reduction.** The initial reference assigns electrotonic path-distance bins using the supplied synapse distances and diameters, with a reduced axial chain and explicit capacitance/leak defaults. This is a declared approximation when a skeleton is unavailable. The full morphology delivery clusters each neuron's arbor into at most $n_{\text{comp}}$ electrotonic compartments. Membrane resistance $R_m$ comes from leak and resting conductances (M4/M5); axial resistance $R_a$ is a global parameter. Length constant $\lambda = \sqrt{R_m d / (4 R_a)}$. Each synapse gets attenuation $A_s = e^{-d_s/\lambda}$ to its compartment.
 2. **Reversal potentials.** Compute intracellular ion concentrations from transporter densities, then $E_X = \frac{RT}{zF} \ln \frac{[X]_o}{[X]_i}$ (Nernst), or the Goldman–Hodgkin–Katz equation for mixed-permeability receptors using `ion_selectivity`.
 3. **Connectome error model.** Gap junctions not observed in EM are added with expected conductance from the gap junction head; synapses below detection confidence are down-weighted by their posterior existence probability.
 4. **Assembly.** Store per-synapse parameters sorted by postsynaptic neuron (CSR layout) for segment-sum accumulation.
@@ -473,14 +481,14 @@ Whether the peptidergic pathway is needed is an empirical question to settle in 
 
 ### M7. Surrogate Reduction
 
-**Purpose.** Replace stiff conductance-based neuron models with fast reduced models at run time.
+**Purpose.** Validate reduced neuron models and their state-conditioned envelopes; subsequently replace stiff full kinetics with a measured fast execution path. The reference may evaluate full kinetics before selecting a surrogate output, and must label this hybrid execution rather than claim acceleration.
 
 | | |
 |---|---|
 | **Inputs** | Full compositional neuron models from M6, clustered into $T$ molecular types |
 | **Outputs** | One surrogate per type, with a validity envelope |
 
-**Method.** Cluster neurons by $z$ into $T$ types. For each type, sample input currents spanning the range observed in simulation, run the full model, and fit a reduced model to the input–output mapping. Record the sampled input range as the validity envelope.
+**Method.** The reference can reuse supplied molecular classes; a later morphology/type pass clusters neurons by $z$ into $T$ types. For each type, sample input currents spanning the range observed in simulation, run the full model, and fit a reduced model to the input–output mapping. Record the sampled input range as the validity envelope.
 
 **Surrogate family** (Section 12.2). Each type tries a fixed cascade and keeps the first model that passes M7-R1:
 1. A fixed low-dimensional conductance-based ODE (2–4 state variables) whose coefficients are functions of modulatory state.
@@ -528,15 +536,15 @@ The family chosen for each type is logged, and the fraction of types at each lev
 | Mode | Use | Notes |
 |---|---|---|
 | `sequential` | Reference runs, long free runs | Exact time stepping |
-| `event` | Large spiking systems | Synaptic work scales with spike count |
-| `parallel` | Training windows (experimental) | Parallel-in-time quasi-Newton with parallel scan (DEER / quasi-DEER / ELK; Lim et al. 2024; Gonzalez et al. 2024); falls back to `sequential` if not converged in $n_{\text{newton}}$ iterations |
+| `event` | Spiking release models | Lazy STP/receptor updates traverse outgoing edges of threshold-crossing neurons; aggregated receptor conductances decay analytically. Graded release uses the sequential chemical update. Neuronal and voltage-solver work remain present |
+| `parallel` | Training windows (experimental) | The reference uses time-parallel Jacobi waveform iteration with an explicit sequential fallback. It is not DEER. DEER / quasi-DEER / ELK are optional later accelerators, evaluated separately (Lim et al. 2024; Gonzalez et al. 2024) |
 
 **Training throughput is planned on `sequential` mode with short-window multiple shooting.** `parallel` mode is research machinery whose convergence on stiff conductance models coupled by gap junctions is unproven: full DEER has cubic cost in state dimension and can be numerically unstable, and the stabilized variants trade that for more iterations. It is an optional accelerator, adopted only after Phase 1 benchmarks show a fallback rate below a configured threshold.
 
 **Requirements.**
 - `M8-R1` All modes produce matching trajectories within tolerance on a reference suite (tested).
 - `M8-R2` Gradients are available in `sequential` and `parallel` modes.
-- `M8-R3` Excluding the voltage solve, per-step cost is $\mathcal{O}(\text{nnz} + N \cdot (P + P_\pi))$ in global mode and $\mathcal{O}(\text{nnz} + N \cdot (P + P_\pi) + n_{\text{grid}})$ in grid mode. The solve costs $\mathcal{O}(N n_{\text{comp}} + n_{\text{gap}})$ per CG iteration. The iteration count is reported, not assumed constant.
+- `M8-R3` Excluding the voltage solve, per-step cost is $\mathcal{O}(\text{nnz} + N \cdot (P + P_\pi))$ in global mode and $\mathcal{O}(\text{nnz} + N \cdot (P + P_\pi) + n_{\text{grid}} \log n_{\text{grid}})$ for the FFT reference grid; a sparse-stencil grid has linear grid cost. The solve costs $\mathcal{O}(N n_{\text{comp}} + n_{\text{gap}})$ per CG iteration. The iteration count is reported, not assumed constant.
 - `M8-R4` Runs are deterministic given a seed. Default precision float32; reference validation runs in float64.
 - `M8-R5` The voltage solve meets its residual tolerance at every step (logged). The float32 result matches a float64 direct solve on the reference suite, and gradients through the solve match finite differences.
 - `M8-R6` Per-step cost including the gap-junction solve is reported separately from synaptic accumulation in all benchmarks.
@@ -757,7 +765,7 @@ def propose_experiments(
 **Why JAX fits this spec.**
 - **Implicit gradients of the voltage solve** (M8-R5) map directly onto `jax.lax.custom_linear_solve` or lineax.
 - **Batching.** $K$ ensemble members × identity samples (M2-R2) × training windows are a nested `vmap`, which also serves M11.
-- **Parallel-in-time mode** builds on `lax.associative_scan`; the DEER-family methods (Lim et al. 2024; Gonzalez et al. 2024) have JAX implementations.
+- **Experimental parallel mode** uses vectorized waveform iteration with convergence checks and sequential fallback. DEER-family implementations are candidates for later evaluation.
 - **Determinism and precision.** Explicit PRNG keys satisfy M8-R4; float64 reference runs need a single configuration flag.
 - **Optimal transport.** OTT-JAX provides fused Gromov–Wasserstein, so M2 can run on GPU and be differentiable. POT remains a fallback.
 - **Sparse synaptic accumulation** is `jax.ops.segment_sum` over the postsynaptic CSR layout.
@@ -777,7 +785,7 @@ def propose_experiments(
 
   **What Jaxley does not provide** (checked against Jaxley 0.14.0 source, 2026-10-06). Its voltage matrix holds only within-cell compartment edges, solved per cell by a tree solver (`jaxley.dhs`) or `jax.sparse` spsolve. Synapses enter as a linearized term on the postsynaptic diagonal with the presynaptic voltage explicit, so nothing couples neurons inside the implicit solve, and there is no gap-junction support. Networks are assembled through per-edge pandas DataFrames. There is no per-neuron switching between surrogate and full models, no field-based coupling (peptidergic or neuromodulatory), and no `event` or `parallel` execution mode.
 
-  **Worm trial (Phase 0).** The Phase 1 worm model is expressed in Jaxley, and a minimal in-house loop is written for the same model. The worm voltage system is about 900 unknowns, so its dense Cholesky solve is cheap and easy to swap in; adding gap junctions to Jaxley is a contained patch, not a reason to leave it. Jaxley becomes the Phase 1 M8 backend if all of the following hold:
+  **Worm trial (Phase 0).** First audit Jaxley's supported interfaces for conditions 1–3 below. If a required interface is absent, select the in-house reference and record the failed condition without forcing an upstream patch or a fork. Compare supported single-cell mechanisms against the in-house loop numerically and through gradients. If the candidate passes the capability audit, express the Phase 1 worm model in Jaxley and benchmark it against the in-house loop. The worm voltage system is about 900 unknowns, so its dense Cholesky solve is cheap and easy to swap in; adding gap junctions to Jaxley is a contained patch, not a reason to leave it. Jaxley becomes the Phase 1 M8 backend if all of the following hold:
   1. Gap junctions are implicit in the voltage solve, through an upstream contribution or an extension that does not fork Jaxley.
   2. The peptidergic head keeps its factorized $\mathcal{O}(N \cdot P_\pi)$ form (M4-R5) without materializing neuron pairs as edges.
   3. Each neuron can switch between its surrogate and the full model at run time (M7-R2).
@@ -806,9 +814,9 @@ Order-of-magnitude estimates assuming float32, about 18 floats of parameters and
 **Throughput.** Synaptic updates are memory-bandwidth bound: each step reads the synapse arrays once. For the whole fly brain at $\Delta t = 0.1$ ms, a simulated second requires about $10^4$ passes over ~3.6 GB, on the order of tens of seconds of wall-clock time per simulated second on a single current-generation GPU. Event-driven mode reduces this in proportion to firing sparsity.
 
 **Scaling requirements.**
-- `C-R1` Per-step simulation cost scales linearly in $N$ and $\text{nnz}$ (verified by benchmarks on subsampled graphs).
+- `C-R1` Local dynamics and synaptic work scale linearly in $N$ and $\text{nnz}$; implicit-solve work depends on iterations/preconditioning and spatial peptide grids add FFT cost. Benchmarks report each cost separately on subsampled graphs.
 - `C-R2` Rule-network parameter count is independent of $N$.
-- `C-R3` For mouse-scale graphs, the simulator supports graph partitioning across devices with halo exchange of boundary neuron states each step.
+- `C-R3` For the Phase 4 mouse-scale delivery, the simulator supports graph partitioning across devices with halo exchange of boundary neuron states each step.
 
 ---
 
@@ -816,7 +824,9 @@ Order-of-magnitude estimates assuming float32, about 18 floats of parameters and
 
 ### 9.1 Metrics
 
-All metrics are normalized by the data's noise ceiling (split-half reliability across trials or animals).
+Every report includes raw metrics with units and an explicitly pre-registered normalization. Similarity metrics use a positive reliability ceiling from repeated trials/animals; error and distance metrics use a positive reliability-derived reference scale. An absent, zero, or invalid scale makes the normalized metric unavailable. A split-half reliability estimate does not automatically supply valid ceilings for AUROC, sign, amplitude, or latency. No numerical claim is inferred from a synthetic normalization of one.
+
+For `leave_class_out`, bootstrap independent canonical classes, retaining bilateral/radial members and repeated state/stimulation conditions in each cluster. For `leave_neuron_out`, cluster repeated conditions by canonical neuron. If there are fewer than two independent held-out clusters, the acceptance interval is unavailable. Overall AUROC and amplitude correlation require resampling and recomputing the statistic; they do not have invented per-neuron AUROCs. Multiple-case global-statistic acceptance requires a joint clustered bootstrap; a reference report may mark it unavailable until that catalog is provided.
 
 | Category | Metric |
 |---|---|
@@ -845,7 +855,7 @@ For context, Shiu et al. (2024) report that a whole-brain leaky integrate-and-fi
 
 ### 9.3 Acceptance criteria
 
-- The compiler outperforms **B0, B1, and B2** on `leave_class_out` perturbation metrics, with paired bootstrap 95% confidence intervals across neurons excluding zero. Residuals are off, and the class partition is the pre-registered one (Section 4.6). Beating B2 is required so that a win cannot come from a model that ignores the connectome.
+- The compiler outperforms **B0, B1, and B2** on `leave_class_out` perturbation metrics, with paired bootstrap 95% confidence intervals across the independent held-out clusters specified in Section 9.1 excluding zero. Residuals are off, and the class partition is the pre-registered one (Section 4.6). Beating B2 is required so that a win cannot come from a model that ignores the connectome.
 - Results against B4 and B5 are always reported and do not gate acceptance.
 - Numerical targets for each metric are set at the end of Phase 0, as a fraction of the noise ceiling.
 
@@ -859,7 +869,8 @@ Every reported result states: split, boundary condition, whether residuals were 
 
 | Phase | Scope | Dependencies | Exit criteria |
 |---|---|---|---|
-| **0. Feasibility** | Rank analysis of $X$ on worm data; reimplementation of B5 (Creamer et al. 2024) on the Randi et al. (2023) atlas, checked against their reported results; Jaxley coverage check and worm M8 trial (`S-R4`); leave-class-out comparison of compositional vs. black-box heads; gauge audit of indicator and opsin expression by cell type; kill criteria K1–K4 below | Public worm data only (CeNGEN, NeuroPAL datasets, Randi et al. 2023 atlas, Beets et al. 2023 peptide–GPCR map) | Class partition and splits pre-registered and frozen; gauge audit complete; then rank estimate and parameter budget fixed; K1–K4 reported; metric targets set |
+| **Reference software (v0.1)** | Section 1.6; M1–M12 reference APIs and M13/distributed interfaces; synthetic demonstrations and numerical tests | No animal-data fitting required | Reference-software exits in Section 1.6 met; open scientific and scale gates explicitly reported |
+| **0. Feasibility** | Rank analysis of $X$ on worm data; reimplementation of B5 (Creamer et al. 2024) on the Randi et al. (2023) atlas, checked against their reported results; Jaxley coverage check and worm M8 trial (`S-R4`); leave-class-out comparison of compositional vs. black-box heads; gauge audit of indicator and opsin expression by cell type; kill criteria K1–K4 below | Public worm data only (CeNGEN, NeuroPAL datasets, Randi et al. 2023 atlas, Beets et al. 2023 peptide–GPCR map) | Class partition and splits pre-registered and frozen; gauge audit complete; then rank diagnostics, architecture and absolute parameter budget fixed; K1–K4 reported; metric targets set |
 | **1. Worm compiler** | M1–M12 end to end on *C. elegans* | Phase 0 | Acceptance criteria (Section 9.3) met on `leave_neuron_out` and `leave_class_out`, **including B2**, residuals off, pre-registered classes; B4/B5 comparisons and $\sigma^2$ residual analysis reported |
 | **2. Fly optic lobe transfer** | Zero-shot and few-shot transfer to the optic lobe | Molecularly annotated optic lobe (connectome: Matsliah et al. 2024, Nern et al. 2025; transcriptomics: Kurmangaliyev et al. 2020, Özel et al. 2021; ExM/ExSeq wet lab); functional recordings | Zero-shot result reported against B0 **and B6** (task-trained connectome model) on held-out neural activity, with no task loss and no functional fine-tuning; few-shot adapter gain quantified. **Transfer failure is an allowed, reportable outcome**; Phase 2 is not planned as the project headline |
 | **3. Whole fly and closed loop** | Whole-brain *Drosophila*; M13 with NeuroMechFly; first zebrafish compile | Phase 2; body model integration | Closed-loop locomotion statistics match data; zebrafish zero-shot result reported |
@@ -871,7 +882,7 @@ Each criterion has a pre-registered threshold, set before the analysis runs. Fai
 
 | ID | Test | Kills or changes |
 |---|---|---|
-| K1 | **Rank and parameter budget.** $\text{rank}_\epsilon(X)$ on worm data, setting M4-R1 | Compositional rules have too few independent directions to learn more than class-level averages |
+| K1 | **Input rank and capacity.** $\text{rank}_\epsilon(X)$ and participation ratio on worm data, reported alongside the architecture and pre-registered absolute parameter budget (M4-R1); compare candidate capacities on held-out classes | Compositional rules have too few independent directions to learn more than class-level averages |
 | K2 | **Volume-transmission ablation.** On the Randi et al. (2023) perturbation atlas, compare B4 (synapse-only) with the peptide-aware compiler, separately for pairs with and without a wired path. Wild-type vs. *unc-31* data are used where available. | If the peptide-aware compiler wins, M4 peptidergic heads become mandatory from Stage 2. If it doesn't (consistent with Creamer et al. 2024), they are dropped from the Phase 1 critical path. Either outcome is a result. |
 | K3 | **Sign audit.** Fraction of glutamate and GABA edges that are `sign_ambiguous` under the prior range of $[\text{Cl}^-]_i$ (M6-R3) | If large, sign metrics are not interpretable without chloride measurements, and K3-targeted mutants (M11) move to the top of the queue |
 | K4 | **Class-split audit.** Effective number of independent expression contrasts in the training split, plus the hull and novel-gene diagnostics (Section 4.6) | If held-out classes are mostly interpolations, `leave_class_out` cannot support a compositionality claim, and the split or dataset must change |
@@ -985,7 +996,7 @@ Every decision listed as open in Revision 3 is made here. Each entry gives the c
 
 ### 12.8 Data licensing and sharing
 
-**Choice.** A data register is kept in the repository. Each dataset is entered before ingestion (M1-R5) with its source, version, license text or link, and one of three tiers:
+**Choice.** A data register is kept in the repository; it can be empty for the initial software release. Synthetic fixtures use their own clearly labeled register. Actual input data are registered before import, including kinetics and any body model data. Each dataset is entered before ingestion (M1-R5) with its source, version, license text or link, and one of three tiers:
 
 | Tier | Meaning | Allowed use |
 |---|---|---|
@@ -1085,3 +1096,5 @@ See the framework document for the full scientific reference list.
 | 4 | 2026-10-06 | All remaining open decisions made; §12 renamed Design Decisions. **PLM:** ESM-2 650M, mean-pooled final layer, windowed for long sequences (§12.1, §4.3). **Surrogates:** fixed ODE → neural ODE → full model cascade per type (§12.2, M7). **Posterior:** deep ensemble with a coverage-based calibration check and per-member Laplace fallback (§6.5, §12.3). **Fly voltage solve:** matrix-free block-Jacobi PCG with a convergence bound and an additive Schwarz escalation path (§12.4, M8). **Peptidergic kernel:** none for worm, learned decay length for fly and larger (§12.5, M4). **$\Delta t$, $n_{\text{comp}}$:** per-species defaults and convergence test (§12.6, §6.6). **M4 message passing:** fixed at 0 (§12.7). **Data:** data register with three tiers (§12.8, §4.1, M1-R5). |
 | 5 | 2026-10-06 | Related work survey added (§1.5), with a list of what this spec does that existing projects do not. **Jaxley** adopted as the backend for M5 mechanisms and M7 full-model runs, and as the numerical reference for M8 (`S-R4`, §7.3). **Baselines:** B5 (Creamer et al.) reimplemented in Phase 0; B6 run from `flyvis`; fly-scale B0 run from the Shiu et al. code. **M13:** BAAIWorm body as the first worm adapter candidate, evaluation only. **M1-R6:** worm ingestion cross-checked against c302. **References:** Bernaerts et al. 2025, Gleeson et al. 2018, Golinelli et al. 2025, Zanichelli et al. 2025 added; Jaxley title confirmed; Zhao et al. 2024 DOI added. |
 | 6 | 2026-10-06 | **M8 backend:** Jaxley's limits checked against its 0.14.0 source and listed (`S-R4`): no gap junctions, no cross-neuron coupling in the implicit solve, no surrogate switching, field coupling or `event`/`parallel` modes. The worm M8 backend is no longer fixed as in-house; it is decided by a Phase 0 trial with five pass conditions (§7.3, §10). Fly-scale M8 stays in-house. |
+
+| 7 | 2026-10-06 | Bounded reference-software exit added (§1.6, §10), preserving scientific phase exits. M4-R1 now uses an explicit absolute capacity budget: input rank is a collinearity diagnostic, not a nonlinear parameter-count bound. Reference morphology and hybrid surrogate execution are declared approximations. Event release semantics and experimental waveform-parallel mode are specified honestly. Peptide receptors keep independent kinetics, grid boundaries are explicit, FFT grid complexity is corrected, metric normalizations require evidence, and bootstrap clusters respect canonical classes and repeated conditions. Jaxley capability failure can select the in-house backend before an unsupported full-network trial. |

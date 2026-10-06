@@ -1,0 +1,129 @@
+{
+  "date": "2026-10-06",
+  "spec_revision": 7,
+  "scope": "initial reference-software release",
+  "hardware": "Apple M4 Pro",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "python": "3.12.13",
+  "versions": {
+    "jax": "0.11.2",
+    "jaxley": "0.14.0",
+    "numpy": "2.5.3",
+    "scipy": "1.18.1",
+    "pot": "0.9.7.post1",
+    "pyarrow": "25.0.1",
+    "pynwb": "4.2.0"
+  },
+  "tests": {
+    "passed": 82,
+    "skipped": 0,
+    "duration_s": 90.76,
+    "command": "uv run pytest -q"
+  },
+  "lint": "passed",
+  "format": "passed",
+  "wheel_and_source_distribution": "built",
+  "file_workflow": "canonical Parquet export, strict YAML run, standard JSON SimGraph and Zarr reload passed",
+  "demo": {
+    "data_kind": "synthetic",
+    "training_steps": 10,
+    "initial_loss": 0.18127787113189697,
+    "final_loss": 0.011004691943526268,
+    "max_solve_residual": 1.2460093046229304e-07
+  },
+  "benchmark": {
+    "data_kind": "synthetic",
+    "backend": "cpu",
+    "devices": [
+      "cpu:0"
+    ],
+    "solver": "matrix_free_pcg",
+    "backward_gradient_target": "external_current_pA",
+    "memory_scope": "neuron/synapse/gap parameter arrays; excludes state, rules and allocator peak",
+    "repeats": 10,
+    "rows": [
+      {
+        "neurons": 8,
+        "synapses": 6,
+        "gap_contacts": 1,
+        "parameter_count": 10461,
+        "step": {
+          "first_call_s": 1.5694463750114664,
+          "steady_call_s": 0.00038576670340262353
+        },
+        "backward_step": {
+          "first_call_s": 0.37900524999713525,
+          "steady_call_s": 0.0007057457987684757
+        },
+        "synaptic_accumulation": {
+          "first_call_s": 0.039378957997541875,
+          "steady_call_s": 1.2479198630899191e-05
+        },
+        "voltage_solve": {
+          "first_call_s": 0.2549431669758633,
+          "steady_call_s": 0.00029007080011069777
+        },
+        "solve_iterations": 2,
+        "solve_residual": 6.663032081632991e-07,
+        "static_parameter_array_bytes": 946
+      },
+      {
+        "neurons": 32,
+        "synapses": 30,
+        "gap_contacts": 1,
+        "parameter_count": 10461,
+        "step": {
+          "first_call_s": 0.49256104201776907,
+          "steady_call_s": 0.0030858749989420174
+        },
+        "backward_step": {
+          "first_call_s": 0.30154466698877513,
+          "steady_call_s": 0.0009923750010784715
+        },
+        "synaptic_accumulation": {
+          "first_call_s": 0.04707500000949949,
+          "steady_call_s": 2.610409865155816e-05
+        },
+        "voltage_solve": {
+          "first_call_s": 0.2524442080175504,
+          "steady_call_s": 0.0002403374994173646
+        },
+        "solve_iterations": 2,
+        "solve_residual": 9.085771779382412e-08,
+        "static_parameter_array_bytes": 3946
+      },
+      {
+        "neurons": 128,
+        "synapses": 126,
+        "gap_contacts": 1,
+        "parameter_count": 10461,
+        "step": {
+          "first_call_s": 0.5323130000033416,
+          "steady_call_s": 0.0005912458000238985
+        },
+        "backward_step": {
+          "first_call_s": 0.34495104203233495,
+          "steady_call_s": 0.0001982791000045836
+        },
+        "synaptic_accumulation": {
+          "first_call_s": 0.04911562497727573,
+          "steady_call_s": 1.552079920656979e-05
+        },
+        "voltage_solve": {
+          "first_call_s": 0.3017176660359837,
+          "steady_call_s": 0.00023799160262569786
+        },
+        "solve_iterations": 2,
+        "solve_residual": 4.357383787123581e-08,
+        "static_parameter_array_bytes": 15946
+      }
+    ],
+    "largest_available_connectome_verified": false
+  },
+  "animal_data_acceptance": false,
+  "limits": [
+    "No animal datasets registered",
+    "No multi-host/GPU or whole-fly throughput evidence",
+    "Real body adapters and fast surrogate execution remain later milestones"
+  ]
+}
