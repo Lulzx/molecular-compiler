@@ -44,7 +44,7 @@ Everything that defines the comparison comes from Phase 0 and is unchanged:
 
 | Item | Choice | Reason |
 |---|---|---|
-| Spatial and time resolution | 1 compartment, dt = 10 ms, float64 | Section 12.6 convergence on this graph. Against dt = 5 ms, the worst relative error over responders was 12% at 10 ms and 134% at 20 ms. |
+| Spatial and time resolution | 1 compartment, dt = 10 ms, float64 | Against dt = 5 ms, the worst relative error over responders was 12% at 10 ms and 134% at 20 ms. The Section 12.6 test as written passes on the untrained model (see the audit findings for the caveat). |
 | Gating | one m and one h gate per channel, with time constants independent of voltage | single-gate generic HH form; Ca²⁺ and U-shaped gating dropped |
 | Connectome units | 0.01 nS per chemical-synapse EM section; 0.05 nS per gap-junction section | Section counts are not conductances. At 1 nS per section, coupling swamped membrane conductance and the network sat near −25 mV. A scan found the network stable and quiescent (rest near −70 mV) up to about 0.015 nS per section, and non-stationary at 0.02 (35 mV drift over 10 s). 0.01 is on the stable side. |
 | Pre-stimulus state | 20 s relaxation from rest, `stop_gradient` | Rest is a fixed point. The gradient through rest is ignored. |
@@ -148,6 +148,14 @@ values are in `data-register.json`.
   - Edges that are net-inhibitory at rest rose from under 1% to about 9%.
   - The first fold launch used the bug, so its runs were discarded (logs in
     `artifacts/phase1/obsolete/`).
+
+- **Section 12.6 convergence.**
+  - `molc phase1-convergence` passed both refinements (halved dt;
+    n_comp + 2) on 24 seeded columns of the untrained model.
+  - The untrained model's metrics are near chance, so this is weak evidence.
+    Two extra compartments changed individual predictions substantially
+    while leaving the metrics nearly unchanged.
+  - Repeat the test on a trained fold before any acceptance claim.
 
 ## Run state (2026-10-06)
 
