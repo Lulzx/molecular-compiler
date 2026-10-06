@@ -2,7 +2,7 @@
 
 *Engineering specification for the system described in "A Molecular Compiler for Whole-Brain Emulation." The framework document explains why each design choice is made; this document specifies what to build.*
 
-*Revision 3 (2026-10-06): incorporates an external technical review, a literature check of every reference, and the implementation-stack decision. See [Revision history](#14-revision-history).*
+*Revision 4 (2026-10-06): incorporates an external technical review, a literature check of every reference, the implementation-stack decision, and decisions on every previously open item (Section 12). See [Revision history](#14-revision-history).*
 
 ---
 
@@ -19,7 +19,7 @@
 9. [Evaluation Specification](#9-evaluation-specification)
 10. [Delivery Phases](#10-delivery-phases)
 11. [Risks and Mitigations](#11-risks-and-mitigations)
-12. [Open Decisions](#12-open-decisions)
+12. [Design Decisions](#12-design-decisions)
 13. [References](#13-references)
 14. [Revision history](#14-revision-history)
 
@@ -176,7 +176,7 @@ flowchart LR
 | Model checkpoints | Framework-native (e.g., Orbax / safetensors) | — |
 | Configuration | YAML, validated against a JSON Schema | Reproducibility |
 
-All quantities carry explicit units in schema metadata. All datasets carry a `dataset_id`, `species`, `animal_id`, and provenance record (source, version, processing hash).
+All quantities carry explicit units in schema metadata. All datasets carry a `dataset_id`, `species`, `animal_id`, and provenance record (source, version, processing hash, license, and data tier; Section 12.8).
 
 ### 4.2 Connectome schema
 
@@ -237,7 +237,7 @@ All quantities carry explicit units in schema metadata. All datasets carry a `da
 | `isoforms` | list[string] | Alternative isoform sequences |
 | `ortholog_group` | string, nullable | Cross-species ortholog cluster |
 | `molecule_class` | enum {`channel`, `receptor`, `transporter`, `innexin`, `peptide`, `gpcr`, `effector`, `other`} | Determines which head of M4 consumes it |
-| `plm_embedding` | float16[d_plm] | Protein language model embedding (precomputed) |
+| `plm_embedding` | float16[1280] | ESM-2 650M embedding, precomputed (Section 12.1) |
 
 **`peptide_receptor_pairs`** (ligand–receptor map for the peptidergic pathway)
 
@@ -333,6 +333,7 @@ Each module lists its purpose, inputs, outputs, method, and requirements. Requir
 - `M1-R2` Gene identifiers are mapped to `ortholog_group` where available; unmapped genes are retained, not dropped.
 - `M1-R3` Recording-to-connectome neuron matches carry a `match_confidence`; matches below a configurable threshold are excluded from training losses but retained for audit.
 - `M1-R4` Every output records a processing hash so any result can be traced to its exact inputs.
+- `M1-R5` Ingestion refuses any dataset without an entry in the data register (Section 12.8). Every derived artifact carries the most restrictive tier among its inputs.
 
 ### M2. Identity Inference
 
@@ -382,7 +383,7 @@ Each module lists its purpose, inputs, outputs, method, and requirements. Requir
 
 1. **Gene tokens.** Each gene $g$ is represented as $u_g = W_{\text{plm}}\, \text{plm}(g) + b_{\text{ortholog}(g)}$, where the ortholog offset is shared within an ortholog group and softly tied by an L2 penalty.
 2. **Neuron encoder.** A permutation-invariant set encoder over expressed genes, weighted by abundance: $z_i = \text{SetEnc}\big(\{(u_g, \rho^{\text{protein}}_{ig})\}_g\big) \in \mathbb{R}^{d_z}$.
-3. **Optional context.** $0$–$2$ message-passing layers over the connectome. Default $0$; enabled only if ablations show benefit on `leave_class_out`, since neighbor context can weaken compositional extrapolation.
+3. **No connectome context.** The encoder uses no message passing over the connectome (Section 12.7). Neighbor context can weaken compositional extrapolation and carries species-specific wiring statistics into the transferable rules. 1–2-layer variants are run as reported ablations only.
 4. **Heads.** All density outputs pass through softplus and are **structurally masked**: a density is zero unless the corresponding gene is expressed above a threshold.
 
 | Head | Output | Form |
@@ -395,7 +396,7 @@ Each module lists its purpose, inputs, outputs, method, and requirements. Requir
 | Neuromodulation (slow) | Release rates, sensitivity $R(z_i)$, effector map $\eta(z_i)$ onto signaling state $m_i$ | Masked by peptide / GPCR / effector expression |
 | Short-term plasticity | $U, \tau_{\text{rec}}, \tau_{\text{fac}}$ per synapse | Bounded by sigmoid to physiological ranges |
 
-**Peptidergic pathway.** Randi et al. (2023) found that signal propagation in the worm head departs from anatomical predictions, and that dense-core-vesicle-dependent signaling produces acute calcium responses (seconds or faster) between neurons with no wired connection, where the relevant peptides and receptors are expressed. The peptidergic head represents this directly: neuron $j$ releases peptide $\pi$ in proportion to $p_{j\pi}\, g_\pi(x_j)$, and neuron $i$ responds through receptor kinetics from M5 scaled by $q_{i\pi}$, **whether or not a synapse $j \to i$ exists**. Receptor kinetics are taken from the GPCR's M5 record, not fixed to a slow timescale. The optional spatial kernel (none, compartment-local, or decay length $\ell_\pi$) follows the short-, mid-, and long-range variants of Ripoll-Sánchez et al. (2023).
+**Peptidergic pathway.** Randi et al. (2023) found that signal propagation in the worm head departs from anatomical predictions, and that dense-core-vesicle-dependent signaling produces acute calcium responses (seconds or faster) between neurons with no wired connection, where the relevant peptides and receptors are expressed. The peptidergic head represents this directly: neuron $j$ releases peptide $\pi$ in proportion to $p_{j\pi}\, g_\pi(x_j)$, and neuron $i$ responds through receptor kinetics from M5 scaled by $q_{i\pi}$, **whether or not a synapse $j \to i$ exists**. Receptor kinetics are taken from the GPCR's M5 record, not fixed to a slow timescale. The spatial kernel is fixed per species (Section 12.5): none (the long-range variant of Ripoll-Sánchez et al. 2023) for *C. elegans*, and a learned decay length $\ell$ via grid mode for *Drosophila* and larger systems.
 
 The slow neuromodulation head and its $k$-dimensional signaling state $m_i$ are kept for state changes over minutes, such as fed vs. starved.
 
@@ -457,7 +458,14 @@ Whether the peptidergic pathway is needed is an empirical question to settle in 
 | **Inputs** | Full compositional neuron models from M6, clustered into $T$ molecular types |
 | **Outputs** | One surrogate per type, with a validity envelope |
 
-**Method.** Cluster neurons by $z$ into $T$ types. For each type, sample input currents spanning the range observed in simulation, run the full model, and fit a reduced model (2–4 state variables, or a small neural ODE) to the input–output mapping. Record the sampled input range as the validity envelope.
+**Method.** Cluster neurons by $z$ into $T$ types. For each type, sample input currents spanning the range observed in simulation, run the full model, and fit a reduced model to the input–output mapping. Record the sampled input range as the validity envelope.
+
+**Surrogate family** (Section 12.2). Each type tries a fixed cascade and keeps the first model that passes M7-R1:
+1. A fixed low-dimensional conductance-based ODE (2–4 state variables) whose coefficients are functions of modulatory state.
+2. A small neural ODE with the same inputs, used only for types where step 1 fails.
+3. The full compositional model.
+
+The family chosen for each type is logged, and the fraction of types at each level is reported.
 
 **Requirements.**
 - `M7-R1` Surrogate error on held-out inputs is below tolerance $\tau_{\text{sur}}$ (configurable) or the type falls back to the full model.
@@ -486,12 +494,12 @@ Whether the peptidergic pathway is needed is an empirical question to settle in 
   $$\Big(\tfrac{C}{\Delta t} + D(t) + \mathcal{L}_{\text{gap}} + \mathcal{L}_{\text{axial}}\Big)\, V^{n+1} = \tfrac{C}{\Delta t} V^n + b(t),$$
   where $D(t)$ is the diagonal of channel and synaptic conductances linearized at step $n$. The matrix is symmetric positive definite.
   - **Small graphs** (*C. elegans*: $302 \times n_{\text{comp}} \approx 900$ unknowns at the default $n_{\text{comp}} = 3$): dense Cholesky, refactored each step because $D(t)$ changes. This is sub-millisecond on a GPU or CPU and avoids sparse-factorization support entirely. Warm-started CG is an acceptable alternative if benchmarks favor it.
-  - **Large graphs**: preconditioned conjugate gradient with a block-Jacobi (per-neuron) preconditioner, warm-started from $V^n$, to a configured relative tolerance.
+  - **Large graphs** (Section 12.4): matrix-free preconditioned conjugate gradient, warm-started from $V^n$, to a configured relative tolerance. The preconditioner is block-Jacobi with one $n_{\text{comp}} \times n_{\text{comp}}$ block per neuron, factored each step by batched dense Cholesky. The matrix–vector product is a segment sum over the gap-junction and axial edges. If the fly-scale benchmark exceeds the iteration budget, the preconditioner is upgraded to two-level additive Schwarz over the graph partitions of `C-R3`.
   - **Gradients**: implicit differentiation of the solve (an adjoint solve with the same matrix), not unrolled CG iterations.
 - Synaptic input: sparse matrix–vector product via segment sum over postsynaptic CSR layout.
 - Peptidergic input: factorized $\mathcal{O}(N \cdot P_\pi)$ release/sensitivity product (M4-R5), with GPCR effector states integrated by Rush–Larsen.
 - Neuromodulation: **global mode** uses the low-rank factorization $q_i^\top Q\big(\sum_j p_j\, g(x_j)\big)$; **grid mode** uses a sparse diffusion stencil or FFT convolution with decay length $\ell$. Mode is selected per species by configuration.
-- Timestep $\Delta t$ is configured per species (graded-potential systems tolerate larger steps than spiking systems).
+- Timestep $\Delta t$ is configured per species (graded-potential systems tolerate larger steps than spiking systems). Defaults and the convergence test are in Section 12.6.
 
 **Execution modes.**
 
@@ -547,7 +555,7 @@ Specified in Section 6.
 | Drug / antagonist | Modifies kinetics or masks a receptor |
 | ExM panel | Reduces M3 uncertainty for chosen molecules |
 
-**Method.** Approximate expected information gain by ensemble disagreement on the candidate's predicted observable (mutual information between prediction and model identity). Divide by cost to rank. Until the posterior decision in Section 12 is made, this score is labeled a **sensitivity proxy**, not an information gain (Section 6.5).
+**Method.** Approximate expected information gain by ensemble disagreement on the candidate's predicted observable (mutual information between prediction and model identity). Divide by cost to rank. Until the ensemble passes the calibration check of Section 6.5, this score is labeled a **sensitivity proxy**, not an information gain.
 
 **Priority order.** Candidates are ranked first by which Phase 0 failure mode they address, and only then by the disagreement score:
 1. **Peptidergic vs. wired transmission (K2).** Dense-core-vesicle release mutants (e.g., *unc-31*/CAPS), neuropeptide-processing mutants (e.g., *egl-3*, *egl-21*), and knockouts of individual peptides and receptors from `peptide_receptor_pairs`.
@@ -626,7 +634,9 @@ $$
 
 ### 6.5 Uncertainty
 
-Train an ensemble of $K$ rule networks with independent initializations and data-order seeds. Deep ensembles can be read as approximate Bayesian model averaging (Lakshminarayanan et al. 2017; Wilson & Izmailov 2020), but with $K = 5$ the ensemble is a **sensitivity probe**, not a calibrated posterior. It is labeled that way in all reports and in M11 until the posterior approximation (Section 12) is chosen and its calibration checked on held-out data. Reported intervals are "ensemble range", not credible intervals.
+Train an ensemble of $K$ rule networks with independent initializations and data-order seeds. Deep ensembles can be read as approximate Bayesian model averaging (Lakshminarayanan et al. 2017; Wilson & Izmailov 2020), but with $K = 5$ the ensemble is a **sensitivity probe**, not a calibrated posterior. The deep ensemble is the chosen posterior approximation (Section 12.3). It is labeled a sensitivity probe in all reports and in M11 until it passes the calibration check below. Reported intervals are "ensemble range", not credible intervals.
+
+**Calibration check.** On `leave_neuron_out`, predictions include M9 observation noise. If the $K$ members and the held-out observation are exchangeable, the observation falls inside the members' min–max range with probability $(K-1)/(K+1)$ (66.7% for $K = 5$). The ensemble passes if empirical coverage is within 5 percentage points of that value, both overall and within each neuron class. If it fails, a Laplace approximation is fitted around each member (Section 12.3) and the check is repeated.
 
 ### 6.6 Initial hyperparameters
 
@@ -636,7 +646,8 @@ These are starting values for Phase 1, to be revised by ablation.
 |---|---|
 | $d_z$ | 64 |
 | Message-passing layers | 0 |
-| $n_{\text{comp}}$ | 3 |
+| $n_{\text{comp}}$ | 3 (worm); per species in Section 12.6 |
+| $\Delta t$ | 0.5 ms (worm); per species in Section 12.6 |
 | Signaling dimension $k$ | 4 |
 | Ensemble size $K$ | 5 |
 | Window length $W$ | Below estimated Lyapunov time, set from Phase 0 data |
@@ -843,24 +854,109 @@ Each criterion has a pre-registered threshold, set before the analysis runs. Fai
 | Leave-class-out tests interpolation only | Held-out classes inside the training hull with no novel genes (K4) | Redefine classes or splits; report as interpolation |
 | Surrogates fail under modulation | High M7 fallback rate in non-default states | State-conditioned surrogates (M7-R4); full model for state evaluations |
 | Gap-junction solve dominates cost | Per-step solve time ≫ synaptic accumulation (M8-R6) | Better preconditioner; exploit the per-neuron block structure; reduce $n_{\text{comp}}$ |
-| Ensemble overconfident | Held-out coverage of ensemble range below nominal | Treat as sensitivity probe only (Section 6.5); move to Laplace, variational, or simulation-based inference |
+| Ensemble overconfident | Held-out coverage of ensemble range below nominal | Treat as sensitivity probe only (Section 6.5); add per-member Laplace approximations (Section 12.3) |
 | Task-trained connectome models beat the compiler | B6 > compiler on held-out fly activity | Report it; analyze which cell types the task model gets right |
 
 ---
 
-## 12. Open Decisions
+## 12. Design Decisions
 
-| Decision | Options | Decide by |
+Every decision listed as open in Revision 3 is made here. Each entry gives the choice, the reason, and the condition that reopens it. Reopening a decision is a spec revision, not a configuration change.
+
+| Decision | Choice | Specified in | Reopen if |
+|---|---|---|---|
+| Numerical framework | Python + JAX (Rev. 3) | §7.3 | — |
+| Protein language model | ESM-2 650M, mean-pooled final layer | §12.1, §4.3 | Phase 0 family-recovery check fails |
+| Surrogate family | Fixed low-dimensional ODE → small neural ODE → full model, per type | §12.2, M7 | More than 25% of types fall back to the full model |
+| Posterior approximation | Deep ensemble, with per-member Laplace if calibration fails | §12.3, §6.5 | Laplace-augmented ensemble also fails calibration |
+| Voltage solver at fly scale | Matrix-free block-Jacobi PCG in JAX | §12.4, M8 | Iteration or time budget exceeded on the fly benchmark |
+| Peptidergic spatial kernel | None for worm; learned decay length for fly and larger | §12.5, M4 | Sensitivity analysis favors another kernel |
+| $\Delta t$ and $n_{\text{comp}}$ | Per-species defaults below, accepted by convergence test | §12.6 | Convergence test fails |
+| Message passing in M4 | 0 layers | §12.7, M4 | Pre-registered ablation criterion met |
+| Data licensing and sharing | Data register with three tiers | §12.8, M1-R5 | — |
+
+### 12.1 Protein language model
+
+**Choice.** ESM-2, 650M parameters (`esm2_t33_650M_UR50D`), MIT license. The gene token input is the mean over residues of the final-layer (layer 33) representation, excluding BOS and EOS tokens, so $d_{\text{plm}} = 1280$, stored as float16. Every isoform in `genes.isoforms` gets its own embedding.
+
+**Long sequences.** Many channels exceed the 1,022-residue context (voltage-gated sodium and calcium channels run to about 2,000 residues). These are embedded in overlapping 1,022-residue windows with stride 511. Each residue's representation is averaged over the windows that contain it before mean pooling.
+
+**Why.** It is open-licensed and widely benchmarked, and its weights are fixed and checksummable, so embeddings are reproducible. Embeddings are precomputed outside the gradient path (`S-R2`), so model size affects only a one-off preprocessing cost. Larger ESM-2 models and ESM C were considered. Neither has an advantage this spec can use, and ESM C uses a custom license.
+
+**Check (Phase 0).** M5-R1 assigns kinetic priors by nearest PLM neighbor, so the embedding must recover molecular family. Nearest-neighbor family assignment on the curated kinetics library must reach at least 90% accuracy under leave-one-family-member-out. The model checkpoint hash is recorded in every dataset's provenance.
+
+### 12.2 Surrogate family
+
+**Choice.** A per-type cascade (M7): a fixed 2–4-variable conductance-based ODE first, a small neural ODE only where that fails M7-R1, and the full model otherwise. Both surrogate forms take $(I_{\text{syn}}, c, m_i, \text{peptidergic drive})$ as inputs (M7-R4).
+
+**Why.** Fixed-form surrogates have interpretable state, behave predictably near the edge of their validity envelope, and are cheapest at run time. Neural ODEs fit more, but they extrapolate unpredictably, which is the failure M7-R2 exists to catch. The cascade uses the more flexible form only where it is needed, and it reports where that is.
+
+**Reopen if** more than 25% of types reach level 3 in Phase 1, since run-time cost then approaches the unreduced model.
+
+### 12.3 Posterior approximation
+
+**Choice.** A deep ensemble ($K = 5$) is the posterior approximation for the rule network and kinetics, subject to the calibration check in Section 6.5. If the check fails, each member gets a linearized Laplace approximation over the M4 head weights with a generalized Gauss–Newton Hessian, and the resulting mixture is checked again.
+
+**Not chosen.**
+- *Variational inference* adds training cost and instability, and mean-field variants are known to underestimate variance. It offers no calibration advantage here.
+- *Simulation-based inference* (Gonçalves et al. 2020) does not scale to the rule network's parameter count. It is used only to characterize kinetic degeneracy for individual molecules or small circuits in M5 reports.
+
+**Reopen if** the Laplace-augmented ensemble also fails calibration. Until a method passes, M11 scores stay labeled as sensitivity proxies.
+
+### 12.4 Voltage solver at fly scale
+
+**Choice.** Matrix-free PCG in JAX with a per-neuron block-Jacobi preconditioner (M8). Blocks are factored each step by batched dense Cholesky; the matrix–vector product is a segment sum over gap-junction and axial edges. Gradients come from implicit differentiation (`jax.lax.custom_linear_solve`).
+
+**Why this converges quickly.** Block-Jacobi absorbs all axial coupling. What remains between blocks is gap-junction coupling, and the preconditioned system has condition number at most about $(1+\rho)/(1-\rho)$, where $\rho = \max_i G_i / (C_i/\Delta t + G_i)$ and $G_i$ is compartment $i$'s total gap-junction conductance. With picofarad capacitances, nanosiemens gap conductances, and $\Delta t = 0.1$ ms, $\rho$ is about 0.1, so a handful of iterations suffices. The bound also says when the solver gets worse: large gap conductance relative to $C/\Delta t$.
+
+**Not chosen.** Incomplete Cholesky has to be refactored every step because $D(t)$ changes, and its triangular solves parallelize poorly on GPUs.
+
+**Escalation.** On the whole-fly benchmark, if the median iteration count to tolerance exceeds 30, or the solve takes more than half the step time (M8-R6), the preconditioner becomes two-level additive Schwarz over the `C-R3` graph partitions, with one coarse unknown per partition. This reuses the Phase 4 partitioning. A native kernel (Section 7.3) is written only for the segment-sum matrix–vector product, and only if profiling shows it below 50% of peak memory bandwidth.
+
+### 12.5 Peptidergic spatial kernel
+
+**Choice.**
+- *C. elegans*: no spatial kernel. Coupling uses the factorized all-to-all form gated only by expression, which corresponds to the long-range network of Ripoll-Sánchez et al. (2023). It keeps the $\mathcal{O}(N \cdot P_\pi)$ cost of M4-R5 with no grid.
+- *Drosophila* and larger systems: a decay length via grid mode (M8). One learned $\ell$ per species is shared across peptides, initialized at 50 µm.
+
+**Not chosen.** A compartment-local kernel needs the subcellular location of release sites and receptors, which `expression.subcellular` rarely resolves, and it breaks the factorized form.
+
+**Sensitivity analysis.** If K2 finds that peptidergic heads help, the mid-range variant of Ripoll-Sánchez et al. (2023) is run once on worm data and reported. It replaces the default only if it beats "none" on K2 metrics with a paired bootstrap 95% CI excluding zero. Per-peptide $\ell_\pi$ is introduced only if M10 residuals concentrate on pairs linked by one peptide.
+
+### 12.6 Timestep and compartments per species
+
+| System | $\Delta t$ | $n_{\text{comp}}$ | Rationale |
+|---|---|---|---|
+| *C. elegans* | 0.5 ms | 3 | Mostly graded potentials; the fastest events (e.g., AWA calcium spikes) last tens of ms |
+| *Drosophila* | 0.1 ms | 4 | Spiking; unipolar neurons with soma, primary neurite, dendritic arbor, and axon |
+| Larval zebrafish | 0.05 ms | 4 | Fast sodium spikes; soma, dendrite, axon initial segment, axon |
+| Mouse | Set in Phase 4 | Set in Phase 4 | — |
+
+**Convergence test.** A $(\Delta t, n_{\text{comp}})$ pair is accepted when halving $\Delta t$, and separately adding two compartments, each change every Section 9.1 metric on the M8 reference suite by less than 2% of that metric's noise ceiling. If either check fails, $\Delta t$ is halved or $n_{\text{comp}}$ increased by one, and the test is repeated. Values are frozen before training starts in each phase.
+
+### 12.7 Message passing in M4
+
+**Choice.** Zero layers, fixed for all Phase 1 and Phase 2 headline and transfer results.
+
+**Why.** Neighbor context brings wiring statistics into the rules. Those statistics differ across species, and they let the network identify a neuron by its neighbors instead of composing from its molecules. Both effects work against G4 and against the `leave_class_out` claim.
+
+**Reopen if** a 1-layer ablation beats 0 layers on `leave_class_out` with a paired bootstrap 95% CI excluding zero, **and** the K4 diagnostics show that the held-out classes test extrapolation rather than interpolation.
+
+### 12.8 Data licensing and sharing
+
+**Choice.** A data register is kept in the repository. Each dataset is entered before ingestion (M1-R5) with its source, version, license text or link, and one of three tiers:
+
+| Tier | Meaning | Allowed use |
 |---|---|---|
-| ~~Numerical framework~~ | **Decided (Rev. 3): Python + JAX.** See Section 7.3 | — |
-| Protein language model for gene tokens | Choice of model and embedding layer | Phase 0 |
-| Surrogate family | Fixed low-dimensional ODE vs. small neural ODE, both conditioned on modulatory state (M7-R4) | Phase 1 ablation |
-| Posterior approximation | Deep ensemble vs. Laplace vs. variational vs. simulation-based inference (Gonçalves et al. 2020) | Phase 1 |
-| Voltage solver at fly scale | Block-Jacobi PCG vs. incomplete Cholesky vs. domain decomposition; native kernel if JAX sparse support is insufficient (Section 7.3) | Phase 2 |
-| Peptidergic spatial kernel | None vs. compartment-local vs. decay length $\ell_\pi$ | Phase 0 (K2) |
-| $\Delta t$ and $n_{\text{comp}}$ per species | Set by convergence tests | Per phase |
-| Message passing in M4 | 0 vs. 1–2 layers | Phase 1 ablation on `leave_class_out` |
-| Data licensing and sharing | Per-dataset terms | Before ingestion |
+| `open` | License permits redistribution of derived data (e.g., CC0, CC-BY) | Any use; derived artifacts may be published |
+| `restricted` | Use permitted, redistribution not (including data under embargo or data-use agreement) | Training and evaluation; derived artifacts stay internal |
+| `excluded` | Terms unclear or incompatible | Not ingested |
+
+**Rules.**
+- Every derived artifact (compiled `SimGraph`, checkpoint, evaluation report) inherits the most restrictive tier among its inputs (M1-R5).
+- Published checkpoints and headline results use `open`-tier data only. If a result also has a `restricted`-tier version, both are reported and labeled.
+- Attribution required by a license is collected automatically from the register into every report's provenance section.
+- Code is released under Apache-2.0, the repository license. Data licenses are tracked separately and are not changed by the code license.
 
 ---
 
@@ -939,3 +1035,4 @@ See the framework document for the full scientific reference list.
 | 1 | — | Initial specification |
 | 2 | 2026-10-06 | Incorporated external technical review and literature check. **Scope:** claim narrowed to a compiled functional atlas (§1.1a). **Peptidergic pathway:** fast, directed, synapse-independent peptidergic head (M4-R5, M4-R6), `peptide_receptor_pairs` schema, `gpcr` kinetics. **Identifiability:** sign audit (M6-R3), cost of gauge fixing (§6.3), degeneracy note (M5), ensemble relabeled as sensitivity probe (§6.5). **Splits:** pre-registered class partition with bilateral homologs held out together, plus split diagnostics (§4.6). **Numerics:** explicit sparse SPD voltage solve with gap junctions (M8-R5, M8-R6); training planned on `sequential` mode, `parallel` mode marked experimental; surrogates conditioned on modulatory state (M7-R4). **Evaluation:** B2 required for acceptance; new baselines B4–B6. **Phases:** Phase 0 kill criteria K1–K4 (§10.1); Phase 2 compares against task-trained connectome models, and transfer failure is an allowed outcome. **M11:** candidates prioritized by kill criterion. **References:** all checked; FlyWire synapse count stated as ~50 million (the 54.5 million figure appears only in secondary sources); Cook et al. counts stated as graph edges, not synapses; Eckstein et al. title corrected. |
 | 3 | 2026-10-06 | Implementation stack decided: Python + JAX core, native kernels only for profiled hot paths and distributed simulation (§7.3, `S-R1`–`S-R3`); framework decision closed in §12. Worm voltage solve changed to dense Cholesky (M8). |
+| 4 | 2026-10-06 | All remaining open decisions made; §12 renamed Design Decisions. **PLM:** ESM-2 650M, mean-pooled final layer, windowed for long sequences (§12.1, §4.3). **Surrogates:** fixed ODE → neural ODE → full model cascade per type (§12.2, M7). **Posterior:** deep ensemble with a coverage-based calibration check and per-member Laplace fallback (§6.5, §12.3). **Fly voltage solve:** matrix-free block-Jacobi PCG with a convergence bound and an additive Schwarz escalation path (§12.4, M8). **Peptidergic kernel:** none for worm, learned decay length for fly and larger (§12.5, M4). **$\Delta t$, $n_{\text{comp}}$:** per-species defaults and convergence test (§12.6, §6.6). **M4 message passing:** fixed at 0 (§12.7). **Data:** data register with three tiers (§12.8, §4.1, M1-R5). |
