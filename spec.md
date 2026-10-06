@@ -2,7 +2,7 @@
 
 *Engineering specification for the system described in "A Molecular Compiler for Whole-Brain Emulation." The framework document explains why each design choice is made; this document specifies what to build.*
 
-*Revision 4 (2026-10-06): incorporates an external technical review, a literature check of every reference, the implementation-stack decision, and decisions on every previously open item (Section 12). See [Revision history](#14-revision-history).*
+*Revision 5 (2026-10-06): incorporates an external technical review, a literature check of every reference, the implementation-stack decision, decisions on every previously open item (Section 12), and a survey of related projects (Section 1.5). See [Revision history](#14-revision-history).*
 
 ---
 
@@ -69,6 +69,27 @@ Only two learned components are allowed to transfer between animals and species:
 | *Drosophila* whole brain | Full transfer target | 139,255 (FlyWire; Dorkenwald et al. 2024) | ~50 million |
 | Larval zebrafish | First vertebrate | ~100,000 | to be determined by dataset |
 | Mouse | Long-term target | ~70 million | ~$10^{11}$ |
+
+### 1.5 Related work
+
+The projects below are the closest existing work, checked on 2026-10-06 against papers, PyPI and GitHub, and against the survey of Zanichelli et al. (2025). The search was not exhaustive; a small or recent repository could have been missed.
+
+| Project | What it does | Relation to this spec | What it lacks relative to this spec |
+|---|---|---|---|
+| flyvis (Lappalainen et al. 2024; PyTorch, MIT) | Differentiable model of the fly visual system; wiring from the connectome, unknown parameters fit by deep learning on a task | Closest relative overall (M6, M8, M10). Baseline B6, and the reference for its training setup | No molecular input. Parameters are learned per cell type, the lookup tables principle 2 rules out. No cross-species transfer |
+| Jaxley (Deistler et al. 2025; JAX, Apache-2.0) | Differentiable multicompartment Hodgkin–Huxley simulator on GPU | Overlaps M5 and M8. Used as the full-model backend and numerical reference (Section 7.3, `S-R4`) | No rule network, connectome ingestion, peptidergic pathway or observation model |
+| Bernaerts et al. (2025; code `berenslab/hh_sbi`) | Fits HH models to single cortical neurons by simulation-based inference, then predicts the fitted conductances from ion-channel gene expression by sparse regression | The only published gene-to-conductance mapping found: a small, per-neuron, non-compositional version of M4 | Single neurons (mouse cortex), not networks. No transfer |
+| Creamer, Leifer & Pillow (2024) | Connectome-constrained linear dynamical model fit to the worm signal propagation atlas | Baseline B5 on the Phase 1 data, and the comparison behind K2 | Linear, no molecular data. No public code found; reimplemented in Phase 0 |
+| Shiu et al. (2024; `philshiu/Drosophila_brain_model`) | Leaky integrate-and-fire model of the whole FlyWire brain | Shows whole-fly simulation from the connectome works at Phase 3 scale. Used as B0 at fly scale | Not differentiable. Sign fixed by transmitter identity; uniform dynamics |
+| BAAIWorm / MetaWorm (Zhao et al. 2024; Apache-2.0) | Biophysically detailed 302-neuron worm model in closed loop with a body and fluid environment | Overlaps M13 and full-detail neuron models. Candidate M13 worm body adapter | Parameters hand-tuned per neuron; nothing learned from molecules; not differentiable |
+| c302 (Gleeson et al. 2018; OpenWorm) | Generates worm network models in NeuroML at several levels of detail | Overlaps M1 and M6 ingestion and assembly; used as an ingestion cross-check (M1-R6) | Not learned, not differentiable |
+| Ce-NeRV3D (Golinelli et al. 2025) | Blender add-on that overlays CeNGEN expression on 3D worm anatomy | Visual sanity check for M2 and M3 outputs | Visualization only |
+
+**What is new here.** No project found combines the following:
+1. **Compositional per-molecule rules.** Existing models fit parameters per neuron or per type, or regress them per neuron (Bernaerts et al. 2025). M4 learns per-molecule parts that apply to every neuron.
+2. **Structural masking with protein-language-model gene tokens**, so the same rules can be applied to a new species (M4-R3, Section 12.1).
+3. **A peptidergic pathway inside a simulator that does not follow wiring.** Ripoll-Sánchez et al. (2023) built the neuropeptide network as a graph; it has not been simulated as a dynamic pathway alongside synapses (M4-R5).
+4. **Sign that emerges from reversal potential and voltage**, with a chloride sign audit (M6-R1, M6-R3). Existing whole-brain models fix sign from the transmitter.
 
 ---
 
@@ -334,6 +355,7 @@ Each module lists its purpose, inputs, outputs, method, and requirements. Requir
 - `M1-R3` Recording-to-connectome neuron matches carry a `match_confidence`; matches below a configurable threshold are excluded from training losses but retained for audit.
 - `M1-R4` Every output records a processing hash so any result can be traced to its exact inputs.
 - `M1-R5` Ingestion refuses any dataset without an entry in the data register (Section 12.8). Every derived artifact carries the most restrictive tier among its inputs.
+- `M1-R6` For *C. elegans*, the ingested connectome is cross-checked against the connectome readers of c302 (Gleeson et al. 2018). Any difference in neuron set or edge counts is explained in the ingestion report.
 
 ### M2. Identity Inference
 
@@ -582,7 +604,7 @@ class BodyModel(Protocol):
     def step(self, motor: MotorOutput, dt_s: float) -> SensoryInput: ...
 ```
 
-Adapters: a biomechanical worm body model and NeuroMechFly for *Drosophila*. Motor and sensory neurons are mapped to body actuators and sensors by configuration.
+Adapters: a biomechanical worm body model and NeuroMechFly for *Drosophila*. The worm adapter's first candidate is the body and fluid environment of BAAIWorm (Zhao et al. 2024). It is not differentiable, so closed-loop worm runs are used for evaluation only, with gradients stopped at the body. Motor and sensory neurons are mapped to body actuators and sensors by configuration.
 
 **Requirements.**
 - `M13-R1` Every evaluation record states its boundary condition: `open_loop` (immobilized) or `closed_loop` (with body model).
@@ -745,9 +767,17 @@ def propose_experiments(
 - `S-R1` M4 → M8 → M9 → M10 is a single differentiable JAX program. No framework boundary is allowed inside the gradient path.
 - `S-R2` External Python tools stay outside the gradient path. These include protein language model embeddings (precomputed into `genes.plm_embedding`), NWB I/O, NeuroMechFly / flygym (M13), and connectome tooling. Baseline B6 (flyvis, Lappalainen et al. 2024) is PyTorch and runs as a separate evaluation job.
 - `S-R3` C++ or Rust is not used as a primary language. Native code is introduced only for profiled hot kernels (Phase 2+) or the distributed simulator (Phase 4), where it is justified.
+- `S-R4` **Jaxley** (Deistler et al. 2025) is the backend for full multicompartment models and the numerical reference for M8. Specifically:
+  - M5 channel and receptor models are written as Jaxley mechanisms where its mechanism interface can express them, so they are not reimplemented.
+  - M7 runs the full models it samples to fit surrogates in Jaxley. These runs happen at compile time, per type, and need no connectome.
+  - The M8 run-time loop stays in-house. It needs the `SimGraph` CSR layout, the global gap-junction solve (M8), surrogates with envelope fallback, peptidergic and neuromodulatory fields, and three execution modes.
+  - The M8 reference suite (M8-R1, M8-R5) includes single-neuron and small-network cases that also run in Jaxley. Trajectories and gradients must match within tolerance.
+
+  Phase 0 confirms that Jaxley's mechanism interface covers the M5 model forms. Any form it cannot express is implemented in-house and listed in the Phase 0 report.
 
 **Alternatives considered.**
 - **PyTorch** is viable and has the larger ecosystem and the flyvis precedent. But implicit linear-solve gradients, parallel scans, and ensemble batching each need more custom work.
+- **Writing M5 from scratch** was rejected because Jaxley already provides differentiable HH mechanisms in JAX, under a compatible license.
 - **Julia** (SciML: DifferentialEquations.jl, SciMLSensitivity, Enzyme, CHOLMOD) is arguably strongest for M5–M8 in isolation. It is weaker on the ML and data sides and has a smaller contributor pool. It would also put a Python↔Julia bridge in the gradient path. It remains an option for **offline** prototyping of stiff kinetics or surrogate fitting (M5/M7) if Phase 0 shows that is where the difficulty lies, since surrogates are fit at compile time and need not share the runtime framework.
 
 ---
@@ -797,10 +827,10 @@ All metrics are normalized by the data's noise ceiling (split-half reliability a
 | B2 | Structure-free data-driven model trained on the same recordings | Does anatomy help? |
 | B3 | Per-animal fitted model with residuals enabled | Upper reference, not a target |
 | B4 | Synapse-only compiler: the full compiler with peptidergic heads removed | Is non-wired transmission needed? (K2) |
-| B5 | Connectome-constrained model fit to activity without molecular rules (e.g., Creamer et al. 2024 for worm; Pospisil et al. 2024 for fly) | Do molecular rules add anything beyond anatomy plus a data fit? |
-| B6 | Task-trained connectome model (Lappalainen et al. 2024), fly optic lobe only | Does the compiler beat the strongest structure-based alternative? |
+| B5 | Connectome-constrained model fit to activity without molecular rules (Creamer et al. 2024 for worm, reimplemented in Phase 0 because no public code was found; Pospisil et al. 2024 for fly) | Do molecular rules add anything beyond anatomy plus a data fit? |
+| B6 | Task-trained connectome model (Lappalainen et al. 2024, run from the `flyvis` package), fly optic lobe only | Does the compiler beat the strongest structure-based alternative? |
 
-For context, Shiu et al. (2024) report that a whole-brain leaky integrate-and-fire *Drosophila* model, with weights from synapse counts and sign from predicted transmitter, predicts sensorimotor circuit activation. That is close to B0 at fly scale, so B0 is not a weak baseline.
+For context, Shiu et al. (2024) report that a whole-brain leaky integrate-and-fire *Drosophila* model, with weights from synapse counts and sign from predicted transmitter, predicts sensorimotor circuit activation. That is close to B0 at fly scale, so B0 is not a weak baseline. At fly scale, B0 is run from their public code (`philshiu/Drosophila_brain_model`) rather than reimplemented.
 
 ### 9.3 Acceptance criteria
 
@@ -818,7 +848,7 @@ Every reported result states: split, boundary condition, whether residuals were 
 
 | Phase | Scope | Dependencies | Exit criteria |
 |---|---|---|---|
-| **0. Feasibility** | Rank analysis of $X$ on worm data; leave-class-out comparison of compositional vs. black-box heads; gauge audit of indicator and opsin expression by cell type; kill criteria K1–K4 below | Public worm data only (CeNGEN, NeuroPAL datasets, Randi et al. 2023 atlas, Beets et al. 2023 peptide–GPCR map) | Class partition and splits pre-registered and frozen; gauge audit complete; then rank estimate and parameter budget fixed; K1–K4 reported; metric targets set |
+| **0. Feasibility** | Rank analysis of $X$ on worm data; reimplementation of B5 (Creamer et al. 2024) on the Randi et al. (2023) atlas, checked against their reported results; Jaxley coverage check (`S-R4`); leave-class-out comparison of compositional vs. black-box heads; gauge audit of indicator and opsin expression by cell type; kill criteria K1–K4 below | Public worm data only (CeNGEN, NeuroPAL datasets, Randi et al. 2023 atlas, Beets et al. 2023 peptide–GPCR map) | Class partition and splits pre-registered and frozen; gauge audit complete; then rank estimate and parameter budget fixed; K1–K4 reported; metric targets set |
 | **1. Worm compiler** | M1–M12 end to end on *C. elegans* | Phase 0 | Acceptance criteria (Section 9.3) met on `leave_neuron_out` and `leave_class_out`, **including B2**, residuals off, pre-registered classes; B4/B5 comparisons and $\sigma^2$ residual analysis reported |
 | **2. Fly optic lobe transfer** | Zero-shot and few-shot transfer to the optic lobe | Molecularly annotated optic lobe (connectome: Matsliah et al. 2024, Nern et al. 2025; transcriptomics: Kurmangaliyev et al. 2020, Özel et al. 2021; ExM/ExSeq wet lab); functional recordings | Zero-shot result reported against B0 **and B6** (task-trained connectome model) on held-out neural activity, with no task loss and no functional fine-tuning; few-shot adapter gain quantified. **Transfer failure is an allowed, reportable outcome**; Phase 2 is not planned as the project headline |
 | **3. Whole fly and closed loop** | Whole-brain *Drosophila*; M13 with NeuroMechFly; first zebrafish compile | Phase 2; body model integration | Closed-loop locomotion statistics match data; zebrafish zero-shot result reported |
@@ -999,7 +1029,7 @@ Every decision listed as open in Revision 3 is made here. Each entry gives the c
 - Pospisil, D. A. et al. (2024). The fly connectome reveals a path to the effectome. *Nature* 634. doi:10.1038/s41586-024-07982-0
 - Randi, F., Sharma, A. K., Dvali, S. & Leifer, A. M. (2023). Neural signal propagation atlas of *Caenorhabditis elegans*. *Nature* 623, 406–414. doi:10.1038/s41586-023-06683-4
 - Shiu, P. K. et al. (2024). A *Drosophila* computational brain model reveals sensorimotor processing. *Nature* 634. doi:10.1038/s41586-024-07763-9
-- Zhao, M. et al. (2024). An integrative data-driven model simulating *C. elegans* brain, body and environment interactions. *Nature Computational Science*.
+- Zhao, M. et al. (2024). An integrative data-driven model simulating *C. elegans* brain, body and environment interactions. *Nature Computational Science*. doi:10.1038/s43588-024-00738-w. Preprint: MetaWorm, *bioRxiv* doi:10.1101/2024.02.22.581686. Code: BAAIWorm.
 
 **Biophysics, degeneracy, and neuromodulation**
 - Goaillard, J.-M. & Marder, E. (2021). Ion channel degeneracy, variability, and covariation in neuron and circuit resilience. *Annual Review of Neuroscience* 44, 335–357.
@@ -1008,7 +1038,8 @@ Every decision listed as open in Revision 3 is made here. Each entry gives the c
 - Prinz, A. A., Bucher, D. & Marder, E. (2004). Similar network activity from disparate circuit parameters. *Nature Neuroscience* 7(12).
 
 **Numerics, learning, and inference**
-- Deistler, M. et al. (2025). Jaxley: differentiable simulation of detailed biophysical models of neural dynamics. *Nature Methods*. † (title wording to confirm)
+- Bernaerts, Y., Deistler, M., Gonçalves, P. J., Beck, J., Stimberg, M., Scala, F., Tolias, A. S., Macke, J. H., Kobak, D. & Berens, P. (2025). Combined statistical-biophysical modeling links ion channel genes to physiology of cortical neuron types. *bioRxiv*. doi:10.1101/2023.03.02.530774
+- Deistler, M. et al. (2025). Jaxley: differentiable simulation enables large-scale training of detailed biophysical models of neural dynamics. *Nature Methods*. †
 - Gonçalves, P. J. et al. (2020). Training deep neural density estimators to identify mechanistic models of neural dynamics. *eLife* 9, e56261.
 - Gonzalez, X., Warrington, A., Smith, J. T. H. & Linderman, S. W. (2024). Towards scalable and stable parallelization of nonlinear RNNs. *NeurIPS*. arXiv:2407.19115
 - Hess, F., Monfared, Z., Brenner, M. & Durstewitz, D. (2023). Generalized teacher forcing for learning chaotic dynamics. *ICML*, PMLR 202, 13017–13049. arXiv:2306.04406
@@ -1020,9 +1051,14 @@ Every decision listed as open in Revision 3 is made here. Each entry gives the c
 
 **Tools**
 - Flamary, R. et al. (2021). POT: Python Optimal Transport. *JMLR* 22(78), 1–8.
+- Gleeson, P. et al. (2018). c302: a multiscale framework for modelling the nervous system of *Caenorhabditis elegans*. *Philosophical Transactions of the Royal Society B* 373(1758), 20170379. doi:10.1098/rstb.2017.0379
+- Golinelli, L. et al. (2025). Ce-NeRV3D: a *C. elegans* Neuron RNA-seq Visualization tool in 3D. *microPublication Biology*. doi:10.17912/micropub.biology.001830
 - Lobato-Ríos, V. et al. (2022). NeuroMechFly, a neuromechanical model of adult *Drosophila melanogaster*. *Nature Methods* 19, 620–627. doi:10.1038/s41592-022-01466-7 †
 - Rübel, O. et al. (2022). The Neurodata Without Borders ecosystem for neurophysiological data science. *eLife* 11, e78362. doi:10.7554/eLife.78362
 - Wang-Chen, S. et al. (2024). NeuroMechFly v2: simulating embodied sensorimotor control in adult *Drosophila*. *Nature Methods* 21. doi:10.1038/s41592-024-02497-y
+
+**Surveys**
+- Zanichelli, N. et al. (2025). State of Brain Emulation Report 2025. *arXiv*:2510.15745
 
 See the framework document for the full scientific reference list.
 
@@ -1036,3 +1072,4 @@ See the framework document for the full scientific reference list.
 | 2 | 2026-10-06 | Incorporated external technical review and literature check. **Scope:** claim narrowed to a compiled functional atlas (§1.1a). **Peptidergic pathway:** fast, directed, synapse-independent peptidergic head (M4-R5, M4-R6), `peptide_receptor_pairs` schema, `gpcr` kinetics. **Identifiability:** sign audit (M6-R3), cost of gauge fixing (§6.3), degeneracy note (M5), ensemble relabeled as sensitivity probe (§6.5). **Splits:** pre-registered class partition with bilateral homologs held out together, plus split diagnostics (§4.6). **Numerics:** explicit sparse SPD voltage solve with gap junctions (M8-R5, M8-R6); training planned on `sequential` mode, `parallel` mode marked experimental; surrogates conditioned on modulatory state (M7-R4). **Evaluation:** B2 required for acceptance; new baselines B4–B6. **Phases:** Phase 0 kill criteria K1–K4 (§10.1); Phase 2 compares against task-trained connectome models, and transfer failure is an allowed outcome. **M11:** candidates prioritized by kill criterion. **References:** all checked; FlyWire synapse count stated as ~50 million (the 54.5 million figure appears only in secondary sources); Cook et al. counts stated as graph edges, not synapses; Eckstein et al. title corrected. |
 | 3 | 2026-10-06 | Implementation stack decided: Python + JAX core, native kernels only for profiled hot paths and distributed simulation (§7.3, `S-R1`–`S-R3`); framework decision closed in §12. Worm voltage solve changed to dense Cholesky (M8). |
 | 4 | 2026-10-06 | All remaining open decisions made; §12 renamed Design Decisions. **PLM:** ESM-2 650M, mean-pooled final layer, windowed for long sequences (§12.1, §4.3). **Surrogates:** fixed ODE → neural ODE → full model cascade per type (§12.2, M7). **Posterior:** deep ensemble with a coverage-based calibration check and per-member Laplace fallback (§6.5, §12.3). **Fly voltage solve:** matrix-free block-Jacobi PCG with a convergence bound and an additive Schwarz escalation path (§12.4, M8). **Peptidergic kernel:** none for worm, learned decay length for fly and larger (§12.5, M4). **$\Delta t$, $n_{\text{comp}}$:** per-species defaults and convergence test (§12.6, §6.6). **M4 message passing:** fixed at 0 (§12.7). **Data:** data register with three tiers (§12.8, §4.1, M1-R5). |
+| 5 | 2026-10-06 | Related work survey added (§1.5), with a list of what this spec does that existing projects do not. **Jaxley** adopted as the backend for M5 mechanisms and M7 full-model runs, and as the numerical reference for M8 (`S-R4`, §7.3). **Baselines:** B5 (Creamer et al.) reimplemented in Phase 0; B6 run from `flyvis`; fly-scale B0 run from the Shiu et al. code. **M13:** BAAIWorm body as the first worm adapter candidate, evaluation only. **M1-R6:** worm ingestion cross-checked against c302. **References:** Bernaerts et al. 2025, Gleeson et al. 2018, Golinelli et al. 2025, Zanichelli et al. 2025 added; Jaxley title confirmed; Zhao et al. 2024 DOI added. |

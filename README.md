@@ -31,7 +31,8 @@ kinetics ────────────────────┘   └�
   probability distribution over molecular identity.
 - compile: apply the learned rules to get channel densities, receptor
   densities, gap junctions and neuropeptide coupling, then reduce each neuron
-  type to a fast surrogate model.
+  type to a fast surrogate model. Types that no surrogate fits run the full
+  model.
 - run: integrate the network. Voltages coupled by gap junctions are solved
   as one sparse linear system each step.
 - observe: convert simulated calcium into predicted fluorescence.
@@ -62,11 +63,26 @@ to beat three baselines on held-out neuron classes:
 - B1: the same inputs fed to an unstructured network.
 - B2: a model trained on the recordings with no anatomy.
 
+Three more baselines are always reported but don't decide acceptance: the
+compiler without neuropeptide signaling, a connectome-constrained model fit
+to activity, and, for the fly optic lobe, a task-trained connectome model.
+
 Before any of this, a feasibility phase tests whether the approach can work
 at all. It checks how many independent directions the molecular data
 contains, whether neuropeptide signaling outside synapses is needed, how many
 synapse signs depend on poorly measured chloride levels, and whether the
 held-out classes are actually new or just interpolations.
+
+## Related work
+
+The closest existing project is flyvis, which fits a fly visual system model
+on top of the connectome but learns parameters per cell type and uses no
+molecular data. Jaxley, a differentiable multicompartment simulator in JAX,
+will run the full neuron models and serve as the numerical reference. As far
+as we found, no existing model learns per-molecule rules that transfer across
+species, simulates neuropeptide signaling that doesn't follow the wiring, or
+lets synapse sign emerge from reversal potentials. Section 1.5 of the spec
+has the full comparison.
 
 ## Stack
 
@@ -74,10 +90,33 @@ Python and JAX. Rules, simulator and training form one differentiable
 program. Native kernels will be added only where profiling at fly scale
 shows they are needed.
 
+## Design decisions
+
+Section 12 of the spec records the main choices, with the reason for each
+and the result that would reopen it:
+
+- Genes are represented by ESM-2 650M protein embeddings, computed once
+  before training.
+- Each neuron type gets a simple fixed ODE surrogate if one fits, a small
+  neural ODE if not, and the full model otherwise.
+- Uncertainty comes from an ensemble of 5 models. It counts as calibrated
+  only after a coverage test on held-out data passes; until then it is
+  reported as a sensitivity probe.
+- At fly scale, the voltage solve uses conjugate gradient with one
+  preconditioner block per neuron.
+- In the worm, neuropeptide coupling has no distance limit. In the fly and
+  larger brains, it falls off with a learned decay length.
+- The default timestep is 0.5 ms for the worm, 0.1 ms for the fly and
+  0.05 ms for zebrafish, each confirmed by a convergence test.
+- The rule network sees each neuron's molecules only, not its neighbors in
+  the connectome.
+- Every dataset is entered in a data register with its license before use.
+  Published models are trained only on data that can be redistributed.
+
 ## Status
 
-Specification only. See [spec.md](spec.md) for modules, data schemas,
-training, evaluation, phases and references.
+Specification only (revision 5). See [spec.md](spec.md) for modules, data
+schemas, training, evaluation, phases and references.
 
 ## License
 
