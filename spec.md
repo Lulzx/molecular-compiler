@@ -2,7 +2,7 @@
 
 *Engineering specification for the system described in "A Molecular Compiler for Whole-Brain Emulation." The framework document explains why each design choice is made; this document specifies what to build.*
 
-*Revision 9 (2026-10-06): starts Phase 1 on C. elegans with the full compiled model on the frozen Phase 0 comparison (Section 10.3), and records its resolution, kinetics, unit, chloride and training choices with their deviations. Revision 8 recorded the Phase 0 outcome (Section 10.2). See [Revision history](#14-revision-history).*
+*Revision 10 (2026-10-07): adds Track I (Section 10.4), which asks two questions: what compact state identifies an individual and persists, and what is the smallest virtual body that keeps an emulated individual within its own state envelope. It pre-registers the first analysis, I0, on the Randi et al. traces. Revision 9 started Phase 1 on C. elegans (Section 10.3). See [Revision history](#14-revision-history).*
 
 ---
 
@@ -39,6 +39,12 @@ What a successful system delivers is a **compiled functional atlas**: a noise-ce
 
 Only two learned components are allowed to transfer between animals and species: the rule network (M4) and the kinetics library (M5). Residuals $\varepsilon_s$ and identity deviations $\delta_i$ absorb within-animal variation and are disabled for every headline result.
 
+**Track I (Revision 10).** The atlas claim treats what differs between animals as noise. Track I (Section 10.4) treats it as the object of study and asks two questions:
+1. **Durable state.** What is the smallest representation $u_a$ of animal $a$ that predicts its own later responses better than the population does, from different stimulations, and that persists over the recording? Fast state (voltages, gates, calcium, synaptic state) is not durable if it can be regenerated from the durable state by relaxation.
+2. **Minimum virtual body.** What is the lowest rung of the M13 body ladder at which a closed-loop emulation keeps both its population statistics and its own $u_a$ over a horizon $H$, instead of falling silent, running away, or drifting toward another animal?
+
+Track I does not change the Phase 0–4 exits, and its results are reported separately. $u_a$ is a description of the individual. It is not a residual, and it never enters a headline compiler result. Track I measures durability only over the time spanned by the data, which is a single 30–45 minute recording session for the Randi et al. and Atanas et al. datasets. Claims about hours or days need longitudinal recordings that the project does not yet have.
+
 ### 1.2 Goals
 
 | ID | Goal |
@@ -49,12 +55,14 @@ Only two learned components are allowed to transfer between animals and species:
 | G4 | Transfer across species with zero-shot or few-shot functional data |
 | G5 | Predict state-conditioned responses to single-neuron perturbation on held-out neurons and neuron classes |
 | G6 | Output ranked recommendations for the next experiments (stimulation targets, mutants, ExM panels) |
+| G7 | Find the smallest per-animal state $u_a$ that predicts an individual's later responses and persists over the recording (Track I) |
+| G8 | Find the lowest body-ladder rung that sustains an emulated individual over a horizon $H$ (Track I, M13) |
 
 ### 1.3 Non-goals
 
 | ID | Non-goal | Reason |
 |---|---|---|
-| NG1 | Long-term learning and memory formation | Requires a model of $z(t)$ over hours; out of scope for the first system |
+| NG1 | Long-term learning and memory formation | Requires a model of $z(t)$ over hours; out of scope for the first system. Since Revision 10, representing and restoring durable state is in scope (Track I, G7). Modeling how that state is formed or changed by learning is still out of scope |
 | NG2 | Development and growth | Connectome is treated as fixed within an emulation window |
 | NG3 | Full morphological (multi-hundred-compartment) simulation at run time | Replaced by compile-time compartment reduction |
 | NG4 | Glial dynamics | Deferred; residual analysis (M10) will flag if needed |
@@ -84,6 +92,7 @@ The projects below are the closest existing work, checked on 2026-10-06 against 
 | BAAIWorm / MetaWorm (Zhao et al. 2024; Apache-2.0) | Biophysically detailed 302-neuron worm model in closed loop with a body and fluid environment | Overlaps M13 and full-detail neuron models. Candidate M13 worm body adapter | Parameters hand-tuned per neuron; nothing learned from molecules; not differentiable |
 | c302 (Gleeson et al. 2018; OpenWorm) | Generates worm network models in NeuroML at several levels of detail | Overlaps M1 and M6 ingestion and assembly; used as an ingestion cross-check (M1-R6) | Not learned, not differentiable |
 | Ce-NeRV3D (Golinelli et al. 2025) | Blender add-on that overlays CeNGEN expression on 3D worm anatomy | Visual sanity check for M2 and M3 outputs | Visualization only |
+| WormSim (`Lulzx/worm-sim`; Rust + JAX, MIT; sister project) | Differentiable worm network simulator fit to recordings. Imports Atanas et al. (2023) freely moving recordings with behavior, infers the full network state from recording history, and specifies a body interface with replay, a reduced differentiable 2D body, and Sibernetic | Track I substrate: the freely moving data, the initial-state inference used by the I1 restore test, and body ladder rungs L2 and L3 (M13) | No molecular rules. Its Atanas importer uses whole-recording z-scored traces (its own preprocessing audit), so Track I reads `trace_array_original` |
 
 **What is new here.** No project found combines the following:
 1. **Compositional per-molecule rules.** Existing models fit parameters per neuron or per type, or regress them per neuron (Bernaerts et al. 2025). M4 learns per-molecule parts that apply to every neuron.
@@ -191,6 +200,10 @@ flowchart LR
 | $X$ | Molecular design matrix: rows for chemical synapses, gap-junction contacts, and peptidergic pairs | $(\text{nnz} + n_{\text{gap}} + \lvert\mathcal{E}_{\text{pep}}\rvert) \times (2d_z + d_e)$ |
 | $T$ | Number of molecular types | scalar |
 | $L$ | Sequence length (timesteps) | scalar |
+| $a$ | Animal index | — |
+| $u_a$ | Durable individual state of animal $a$ (Track I) | $\mathbb{R}^{r}$ |
+| $V$ | Shared basis mapping $u_a$ to per-pair response deviations | $n_{\text{pairs}} \times r$ |
+| $H$ | Sustain horizon of a closed-loop emulation | s |
 
 ---
 
@@ -330,6 +343,10 @@ Splits are defined once, stored with the dataset, and never changed after Phase 
 | `leave_class_out` | Entire neuron classes | Compositional extrapolation |
 | `leave_state_out` | An internal state (e.g., starved) | Neuromodulation model |
 | `leave_species_out` | Whole species | Cross-species transfer |
+| `within_animal_chronological` | The later half of each held-out animal's stimulation events | Durable individual state (Track I) |
+| `within_animal_interleaved` | Alternate stimulation events of each held-out animal | Individual state without drift (Track I control) |
+
+The two `within_animal_*` splits were added in Revision 10. They do not change the five splits frozen in Phase 0, and they are always used inside the `leave_animal_out` folds, so the shared basis never sees the held-out animal.
 
 **Class definition for `leave_class_out`.** The class partition is pre-registered in Phase 0 and frozen with the splits.
 - *C. elegans*: the 118 canonical neuron classes resolved by CeNGEN (Taylor et al. 2021). Bilateral homologs and radial members of a class are always held out together; holding out one cell of a left/right pair is a `leave_neuron_out` test, not a class test.
@@ -614,8 +631,24 @@ class BodyModel(Protocol):
 
 Adapters: a biomechanical worm body model and NeuroMechFly for *Drosophila*. The worm adapter's first candidate is the body and fluid environment of BAAIWorm (Zhao et al. 2024). It is not differentiable, so closed-loop worm runs are used for evaluation only, with gradients stopped at the body. Motor and sensory neurons are mapped to body actuators and sensors by configuration.
 
+WormSim (Section 1.5) provides replay and a reduced differentiable 2D body behind an equivalent interface. It is the first candidate for ladder rungs L2 and L3 below, and its reduced body allows gradients through the body.
+
+**Body ladder (Revision 10).** Each rung adds one channel of body-to-brain feedback. The minimum virtual body is the lowest rung that passes `M13-R3`.
+
+| Rung | Body | Feedback reaching the brain |
+|---|---|---|
+| L0 | None | Nothing (immobilized, as in Randi et al. 2023) |
+| L1 | Tonic drive | A constant per-sensory-neuron current, fitted once on the population |
+| L2 | Replay | Recorded posture and stimuli converted to sensory input, open loop |
+| L3 | Proprioceptive loop | Reduced 2D body; stretch-sensitive neurons (DVA, SMDD, B-class motor neurons) driven by curvature |
+| L4 | L3 plus interoception | Feeding state and pumping fed back through modulator concentrations $c(t)$ |
+| L5 | Full body | BAAIWorm or Sibernetic body and fluid environment |
+
 **Requirements.**
 - `M13-R1` Every evaluation record states its boundary condition: `open_loop` (immobilized) or `closed_loop` (with body model).
+- `M13-R2` Every closed-loop record states its ladder rung and horizon $H$.
+- `M13-R3` **Sustain criterion.** A rung sustains animal $a$ over $H$ when (i) the Section 9.1 spontaneous-activity metrics of the free-running emulation remain within the across-animal spread of the recorded population, with no silent or saturated neurons beyond those observed in data, and (ii) the durable state decoded from the emulation's activity by the Track I encoder stays closer to $u_a$ than to the $u$ of any other held-out animal, at every checkpoint in $[0, H]$. Passing (i) without (ii) means the body sustains *a* worm but not *this* worm.
+- `M13-R4` Rungs are tested in order, and every rung up to the first pass is reported. A higher rung that fails where a lower one passes is reported as a body-model defect, not as a smaller minimum.
 
 ---
 
@@ -861,7 +894,7 @@ For context, Shiu et al. (2024) report that a whole-brain leaky integrate-and-fi
 
 ### 9.4 Reporting requirements
 
-Every reported result states: split, boundary condition, whether residuals were enabled (headline results: never), identity-sample averaging, ensemble size (labeled as a sensitivity probe, Section 6.5), fitted $\sigma^2$, gauge used, split diagnostics (Section 4.6), fraction of `sign_ambiguous` edges, and data processing hashes.
+Every reported result states: split, boundary condition, whether residuals were enabled (headline results: never), identity-sample averaging, ensemble size (labeled as a sensitivity probe, Section 6.5), fitted $\sigma^2$, gauge used, split diagnostics (Section 4.6), fraction of `sign_ambiguous` edges, and data processing hashes. Track I results also state the latent rank $r$, the time span the durability claim covers, and, for closed-loop runs, the ladder rung and $H$ (`M13-R2`).
 
 ---
 
@@ -875,6 +908,7 @@ Every reported result states: split, boundary condition, whether residuals were 
 | **2. Fly optic lobe transfer** | Zero-shot and few-shot transfer to the optic lobe | Molecularly annotated optic lobe (connectome: Matsliah et al. 2024, Nern et al. 2025; transcriptomics: Kurmangaliyev et al. 2020, Özel et al. 2021; ExM/ExSeq wet lab); functional recordings | Zero-shot result reported against B0 **and B6** (task-trained connectome model) on held-out neural activity, with no task loss and no functional fine-tuning; few-shot adapter gain quantified. **Transfer failure is an allowed, reportable outcome**; Phase 2 is not planned as the project headline |
 | **3. Whole fly and closed loop** | Whole-brain *Drosophila*; M13 with NeuroMechFly; first zebrafish compile | Phase 2; body model integration | Closed-loop locomotion statistics match data; zebrafish zero-shot result reported |
 | **4. Scale infrastructure** | Distributed simulator, grid-mode neuromodulation, graph partitioning | Phase 3 | `C-R1` verified up to the largest available connectome |
+| **Track I. Individual state and minimum body** | I0–I2 in Section 10.4: per-animal durable latent on recorded responses; restore test in the compiled simulator; body ladder on freely moving data | I0: Randi et al. traces only. I1: a trained Phase 1 model with dynamic slow state. I2: I0 and I1, WormSim body rungs, Atanas et al. (2023) recordings | I0: gates I0-1 to I0-3 reported. I1: sufficient durable state and its size reported. I2: lowest sustaining rung reported, or no rung sustains (an allowed outcome) |
 
 ### 10.1 Phase 0 kill criteria
 
@@ -930,6 +964,35 @@ Phase 1 runs the compiled and simulated model (M4–M9) on the frozen Phase 0 co
 
 A pass under these deviations supports the full-model claim only for the perturbation pathway at this resolution. A failure does not separate a molecular-rule failure from under-training. Section 11 requires the M10 residual analysis either way.
 
+### 10.4 Track I: durable individual state and minimum virtual body (Revision 10)
+
+Track I asks what has to be kept, and what has to be connected, for an emulation to remain a particular animal. It has three stages. Each stage defines its object by a test, not by a choice of variables.
+
+**Stage I0: per-animal latent on recorded responses.** This stage is pre-registered here, before any analysis has read per-animal response deviations. The pooled held-out-animal metrics of `molc heldout-animals` had already been seen. Inputs are the ingested Randi et al. (2023) wild-type traces: atlas-included, non-outlier trials with label confidence ≥ 0.95, using the per-trial mean ΔF/F0 (`load_responses`). The data constrain the design. There are 109 animals with a median of 18 stimulation events, and only about 14% of (responder, stimulated) pairs repeat within an animal. The later half of an animal's recording therefore mostly contains pairs that were not seen in the first half, and a per-animal latent must carry from some pairs to others.
+
+- *Folds.* The five `leave_animal_out` folds of `molc heldout-animals` (same seed). An animal is scored only if it has at least 6 events. Its events are split by event order, which is chronological, into an early half (fit) and a late half (score): `within_animal_chronological`. Odd and even events give the `within_animal_interleaved` split.
+- *Population reference $P$.* Training-animal pair means shrunk toward zero, $P_p = \sum y / (n_p + \kappa)$.
+- *Models.* Every model predicts a trial of pair $p$ in animal $a$ as $P_p + $ a deviation:
+  - `pop`: no deviation ($r = 0$);
+  - `gain`: $u_a P_p$ with scalar $u_a$, covering global excitability or indicator gain;
+  - `factor-r`: $V_p^\top u_a$ with $r \in \{1, 2, 4, 8, 16\}$. $V$ is fit by ridge alternating least squares on training animals' deviations from $P$ (ridge $\lambda_V$). For a held-out animal, $V$ is fixed and $u_a$ is fit by ridge regression (ridge $\lambda_u$) on its fit-half trials;
+  - `swap-r`: `factor-r`, but scored with the $u$ of another held-out animal in the same fold (a seeded derangement), as an individuality control.
+- *Hyperparameters.* $\kappa$, $\lambda_V$ and $\lambda_u$ are chosen from $\{0.1, 1, 10\}^3$ by the same chronological protocol run inside the training animals (inner 4-fold `leave_animal_out`), separately for each outer fold and $r$. No held-out-animal data are used.
+- *Metric.* Gain over `pop` on score-half trials, $G = 1 - \sum \text{SE}_{\text{model}} / \sum \text{SE}_{\text{pop}}$, pooled over animals. Intervals come from 2,000 bootstrap draws that resample animals. The reference ceiling is $1 - \hat\sigma^2_{\text{trial}} / \text{MSE}_{\text{pop}}$, where $\hat\sigma^2_{\text{trial}}$ is the pooled within-animal, within-pair trial variance.
+- *Rank.* $r^\ast$ is the smallest $r$ whose chronological $G$ is within one bootstrap standard error of the best, which is the same rule as Stage B.
+
+| Gate | Test (95% animal-bootstrap interval) | Meaning of a pass |
+|---|---|---|
+| I0-1 | $G(\text{factor-}r^\ast) > 0$ and $G(\text{factor-}r^\ast) - G(\text{swap-}r^\ast) > 0$ on `within_animal_chronological` | A compact individual state exists, carries to unseen pairs, and belongs to that animal |
+| I0-2 | $G(\text{factor-}r^\ast) - G(\text{gain}) > 0$ | The state is more than one global scale. A scalar gain alone cannot be separated from indicator expression (Section 10.2, Gauge) and is not counted as biological evidence |
+| I0-3 | $G_{\text{chron}} - G_{\text{interleaved}}$ for factor-$r^\ast$ | An interval that includes zero means durable over the session. An interval below zero means the state drifts within a recording, and its size measures the drift |
+
+Results are restricted and stay local (`artifacts/individual/`), and this section records only the decisions they force. Each latent is also correlated with recording covariates (matched trace count, recording duration, dataset batch). A latent that is mostly predicted by covariates is reported as measurement state.
+
+**Stage I1: restore test in the compiled simulator.** A candidate durable state $d$ is *sufficient* at tolerance $\tau$ if the following procedure reproduces the uninterrupted run's predicted responses within $\tau$ times the noise ceiling: run the model, discard everything except $d$, regenerate the fast state by relaxation or by WormSim-style initial-state inference from a short history, then continue. Candidates are tested from small to large: $d_0 = \{u_a\}$, then adding $c(t)$, then $m_i(t)$, then per-synapse state. The test is non-trivial only once slow variables evolve during a run. In the Phase 1 model, rest is a fixed point and every slow quantity is a compile-time constant, so $d$ = compiled parameters passes trivially. I1 therefore starts after M4–M9 carry dynamic $c(t)$ and $m_i(t)$, and it maps the I0 basis $V$ onto compiler directions ($\delta_i$, $g_i$, densities) so that $u_a$ gains a mechanistic reading.
+
+**Stage I2: minimum virtual body.** The Phase 1 model sits at a quiet fixed point near −70 mV with no input. Recorded worms show ongoing whole-brain dynamics (Kato et al. 2015; Atanas et al. 2023). An L0 emulation therefore fails the first part of `M13-R3`, unless training on spontaneous activity changes its rest state. I2 climbs the M13 ladder on the Atanas et al. freely moving recordings (21 NeuroPAL-labeled baseline animals with velocity, head angle and pumping, available through the WormSim importer). It reads `trace_array_original`, because the published traces are whole-recording z-scores that depend on future samples. For each animal, I2 reports the lowest rung that passes `M13-R3` at $H$ = 60 s, 300 s and the full recording. Rung L4 needs a modulator pathway; peptidergic heads left the Phase 1 critical path (K2), so L4 uses monoamine and insulin channels of $c(t)$ unless K2 is reopened. If no rung sustains the individual, that is a reportable outcome. It means the durable state is not held by the model's slow variables, or the body is missing a channel, and the I1 restore test distinguishes the two.
+
 ## 11. Risks and Mitigations
 
 | Risk | Signal | Mitigation |
@@ -949,6 +1012,10 @@ A pass under these deviations supports the full-model claim only for the perturb
 | Gap-junction solve dominates cost | Per-step solve time ≫ synaptic accumulation (M8-R6) | Better preconditioner; exploit the per-neuron block structure; reduce $n_{\text{comp}}$ |
 | Ensemble overconfident | Held-out coverage of ensemble range below nominal | Treat as sensitivity probe only (Section 6.5); add per-member Laplace approximations (Section 12.3) |
 | Task-trained connectome models beat the compiler | B6 > compiler on held-out fly activity | Report it; analyze which cell types the task model gets right |
+| Individual latent is measurement state | I0-2 fails, or the latent is predicted by recording covariates | Report it as measurement state; ratiometric or reference-channel imaging before biological claims |
+| Session too short for "durable" | I0-3 can only cover one 30–45 minute recording | State the time span in every Track I claim; longitudinal recordings of the same animals across days enter M11 as Track I experiments |
+| Sparse pair overlap starves $V$ | Pairs seen in few training animals; flat gain curve across $r$ | Ridge on $V$; report the per-pair training count of scored trials; a responder × stimulated factorized basis as a declared fallback |
+| No body rung sustains the individual | `M13-R3` (ii) fails at every rung | Run the I1 restore test to separate missing slow state from missing body channels; report either outcome |
 
 ---
 
@@ -1085,7 +1152,10 @@ Every decision listed as open in Revision 3 is made here. Each entry gives the c
 - Tanis, J. E. et al. (2009). The potassium chloride cotransporter KCC-2 coordinates development of inhibitory neurotransmission and synapse structure in *Caenorhabditis elegans*. *Journal of Neuroscience* 29(32), 9943–9954. †
 
 **Functional data and whole-brain models**
-- Atanas, A. A. et al. (2023). Brain-wide representations of behavior spanning multiple timescales and states in *C. elegans*. *Cell* 186(19).
+- Atanas, A. A. et al. (2023). Brain-wide representations of behavior spanning multiple timescales and states in *C. elegans*. *Cell* 186(19). doi:10.1016/j.cell.2023.07.035
+- Flavell, S. W. et al. (2013). Serotonin and the neuropeptide PDF initiate and extend opposing behavioral states in *C. elegans*. *Cell* 154(5), 1023–1035. †
+- Kato, S. et al. (2015). Global brain dynamics embed the motor command sequence of *Caenorhabditis elegans*. *Cell* 163(3), 656–669. †
+- Stern, S., Kirst, C. & Bargmann, C. I. (2017). Neuromodulatory control of long-term behavioral patterns and individuality across development. *Cell* 171(7), 1649–1662. †
 - Creamer, M. S., Leifer, A. M. & Pillow, J. W. (2024). Bridging the gap between the connectome and whole-brain activity in *C. elegans*. *bioRxiv*. doi:10.1101/2024.09.22.614271
 - Lappalainen, J. K. et al. (2024). Connectome-constrained networks predict neural activity across the fly visual system. *Nature* 634, 1132–1140. doi:10.1038/s41586-024-07939-3
 - Mi, L. et al. (2022). Connectome-constrained latent variable model of whole-brain neural activity. *ICLR*.
@@ -1140,3 +1210,4 @@ See the framework document for the full scientific reference list.
 | 7 | 2026-10-06 | Bounded reference-software exit added (§1.6, §10), preserving scientific phase exits. M4-R1 now uses an explicit absolute capacity budget: input rank is a collinearity diagnostic, not a nonlinear parameter-count bound. Reference morphology and hybrid surrogate execution are declared approximations. Event release semantics and experimental waveform-parallel mode are specified honestly. Peptide receptors keep independent kinetics, grid boundaries are explicit, FFT grid complexity is corrected, metric normalizations require evidence, and bootstrap clusters respect canonical classes and repeated conditions. Jaxley capability failure can select the in-house backend before an unsupported full-network trial. |
 | 9 | 2026-10-06 | Phase 1 started on C. elegans (§10.3). M5 generic HH gains an optional inactivation gate. `ResolutionPolicy` gains connectome unit conversions. Phase 1 resolution, chloride, observation and training choices recorded with their deviations from §6 and §12.6. |
 | 8 | 2026-10-06 | Phase 0 run on public worm data (§10.2). **K2:** peptidergic heads leave the Phase 1 critical path (§6.4). **K3:** failed; sign is reported by stability and K3 experiments lead M11. **K4:** contrast participation ratio defined on standardized columns (§4.6). **§12.1:** reopened; kinetic priors use curated family labels before PLM neighbors. **S-R4:** worm M8 backend is in-house. **Stage B** frozen: compact $k=2$ tied heads, 13-parameter budget, metric targets. B0 matching the linear-response compiler is recorded as a Phase 1 risk. |
+| 10 | 2026-10-07 | **Track I** added (§1.1a, §10.4): durable individual state and minimum virtual body. Goals G7–G8. NG1 narrowed: representing and restoring durable state is in scope, while learning stays out. Notation $a$, $u_a$, $V$, $H$. Splits `within_animal_chronological` and `within_animal_interleaved`, used inside the `leave_animal_out` folds (§4.6). **M13:** body ladder L0–L5, `M13-R2`–`M13-R4`, sustain criterion. **Stage I0** pre-registered on the Randi et al. traces (gates I0-1 to I0-3). WormSim added to related work as the Track I body and freely moving data substrate. Risks and references (Flavell 2013, Kato 2015, Stern 2017) added. |
