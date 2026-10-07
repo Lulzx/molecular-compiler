@@ -12,7 +12,11 @@ restore test in the simulator, and I2, the body ladder, wait for a trained
 Phase 1 model with dynamic slow state.
 
 The Stage I0 design, gates and decision rules were committed in spec
-Revision 10 before any code read per-animal response deviations. The pooled
+Revision 10 before any code read per-animal response deviations.
+Revision 11 replaced I0-3 before any I0 output existed. Under Revision 10, an
+interval containing zero counted as durable, which only shows that drift was
+not detected. The first run was stopped before it wrote results, and its log
+is in `artifacts/individual/obsolete/`. The pooled
 metrics of `molc heldout-animals` had been seen. The analysis code was
 committed before its first run on real data. Results are restricted and stay
 in `artifacts/individual/`.
@@ -25,7 +29,8 @@ uv run molc individual-state   # writes artifacts/individual/individual-state.js
 
 It needs the ingested traces (`molc traces-ingest`; see
 [phase1.md](phase1.md)). The full nested selection takes about 40 minutes on
-a 12-core CPU.
+a 12-core CPU. Each run also writes per-trial squared errors to
+`individual-errors.npz` so the gates can be recomputed without refitting.
 
 ## What it does
 
@@ -70,7 +75,7 @@ the best rank's G.
 |---|---|---|
 | I0-1 | G(factor-r\*) > 0 **and** G(factor-r\*) − G(swap-r\*) > 0 (95% intervals) | A compact state carries to unseen pairs and belongs to that animal |
 | I0-2 | G(factor-r\*) − G(gain) > 0 | More than one global scale. A scalar gain alone is not counted as biological evidence (indicator-gain confound, spec 10.2) |
-| I0-3 | G_chron − G_interleaved: an interval that includes or lies above 0 means `durable_over_session`; an interval below 0 means `drifts_within_session` | Durability over one recording session only (median about 32 min) |
+| I0-3 | Persistence ratio R = G_chron / G_interleaved, with animals bootstrapped jointly. `durable`: the 95% interval of R is above 0.75 and at most 2.5% of draws have G_interleaved ≤ 0. `drifts`: the interval of R is below 1, or the interval of G_chron − G_interleaved is below 0. Otherwise `inconclusive` | Persistence over one recording session only (median about 32 min). Not detecting drift is not evidence of persistence |
 
 **Covariate audit.** Each latent (`gain` and `factor-r*`, fit on the early
 half) is regressed on:
@@ -90,7 +95,9 @@ reported alongside.
 - A planted rank-2 latent passes I0-1 and I0-2.
 - With no latent, I0-1 fails.
 - A latent that flips sign halfway through the recording is classified by
-  I0-3 as `drifts_within_session`.
+  I0-3 as `drifts`.
+- A latent that shrinks to 40% halfway through is not classified as
+  `durable`.
 - r\* can land one rank above the planted rank. With a fixed ridge, the extra
   dimensions recover some of the shrinkage, so the 1-SE rule's r\* is an
   upper bound on the knee, not the knee itself.

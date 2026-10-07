@@ -31,6 +31,7 @@ MIN_EVENTS = 6
 ALS_ITERATIONS = 25
 SAMPLES = 2000
 COVARIATE_R2 = 0.5
+DRIFT_MARGIN = 0.75  # Revision 11: durable needs G_chron / G_interleaved > 0.75
 
 
 # ---------------------------------------------------------------- data
@@ -313,6 +314,7 @@ def run(
     ranks=RANKS,
     samples=SAMPLES,
     metadata=None,
+    errors_path=None,
     log=print,
 ):
     animals = np.unique(table["animal"])
@@ -359,6 +361,14 @@ def run(
         s: {m: np.concatenate(v) for m, v in e.items()} for s, e in errors.items()
     }
     clusters = {s: np.concatenate(v) for s, v in clusters.items()}
+    if errors_path is not None:
+        np.savez_compressed(
+            errors_path,
+            **{
+                f"{s}/{m}": e for s, models in errors.items() for m, e in models.items()
+            },
+            **{f"{s}/animal": c for s, c in clusters.items()},
+        )
 
     def boot(split, statistic):
         return cluster_bootstrap(None, clusters[split], statistic, samples, seed)
@@ -428,7 +438,15 @@ def run(
 
 
 def durability(errors, clusters, model, samples=SAMPLES, seed=SEED):
-    """G_chron - G_interleaved, bootstrapping animals jointly across splits."""
+    """Persistence ratio G_chron / G_interleaved (spec Revision 11).
+
+    Animals are bootstrapped jointly across both splits. `durable` needs the
+    95% ratio interval above DRIFT_MARGIN; draws with G_interleaved <= 0 have
+    no state to persist, and more than 2.5% of them rule `durable` out.
+    `drifts` needs the ratio interval below 1 or the interval of
+    G_chron - G_interleaved below 0 (strong drift can erase the interleaved
+    gain itself). Anything else is `inconclusive`.
+    """
     members = {
         s: {a: np.flatnonzero(clusters[s] == a) for a in np.unique(clusters[s])}
         for s in clusters
@@ -439,25 +457,38 @@ def durability(errors, clusters, model, samples=SAMPLES, seed=SEED):
         rows = np.concatenate([members[split][a] for a in drawn])
         return 1 - errors[split][model][rows].sum() / errors[split]["pop"][rows].sum()
 
-    def stat(drawn):
-        return gain("chronological", drawn) - gain("interleaved", drawn)
+    def pair(drawn):
+        return gain("chronological", drawn), gain("interleaved", drawn)
 
-    point = stat(animals)
+    chron, inter = pair(animals)
     rng = np.random.default_rng(seed)
-    draws = [
-        stat(rng.choice(animals, size=len(animals), replace=True))
-        for _ in range(samples)
-    ]
-    interval = np.quantile(draws, [0.025, 0.975]).tolist()
-    if interval[0] > 0 or interval[1] >= 0 >= interval[0]:
-        verdict = "durable_over_session"
+    draws = np.array(
+        [
+            pair(rng.choice(animals, size=len(animals), replace=True))
+            for _ in range(samples)
+        ]
+    )
+    positive = draws[:, 1] > 0
+    ratios = draws[positive, 0] / draws[positive, 1]
+    excluded = 1 - positive.mean()
+    interval = np.quantile(ratios, [0.025, 0.975]).tolist() if len(ratios) else None
+    difference = draws[:, 0] - draws[:, 1]
+    difference_interval = np.quantile(difference, [0.025, 0.975]).tolist()
+    ratio_valid = interval is not None and excluded <= 0.025
+    if ratio_valid and interval[0] > DRIFT_MARGIN:
+        verdict = "durable"
+    elif difference_interval[1] < 0 or (ratio_valid and interval[1] < 1):
+        verdict = "drifts"
     else:
-        verdict = "drifts_within_session"
+        verdict = "inconclusive"
     return {
         "model": model,
-        "mean": float(point),
-        "interval": interval,
-        "se": float(np.std(draws)),
+        "margin": DRIFT_MARGIN,
+        "ratio": float(chron / inter) if inter > 0 else None,
+        "ratio_interval": interval,
+        "draws_without_state": float(excluded),
+        "difference": float(chron - inter),
+        "difference_interval": difference_interval,
         "verdict": verdict,
     }
 
@@ -468,7 +499,13 @@ def individual_state(project, output, log=print):
     manifest = json.loads((Path(project) / "manifest.json").read_text())
     n = len(manifest["neuron_names"])
     table, events = trial_table(load_responses(project, "wt"), n)
-    result = run(table, events, metadata=recording_metadata(project), log=log)
     out = Path(output)
     out.mkdir(parents=True, exist_ok=True)
+    result = run(
+        table,
+        events,
+        metadata=recording_metadata(project),
+        log=log,
+        errors_path=out / "individual-errors.npz",
+    )
     return _dump(out / "individual-state.json", result)

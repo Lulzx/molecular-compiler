@@ -22,7 +22,11 @@ def _synthetic(
     for a in range(animals):
         u = scale * rng.normal(0, 1, rank)
         for e in range(events):
-            current = -u if drift and e >= events // 2 else u
+            late = e >= events // 2
+            if drift == "partial":
+                current = 0.4 * u if late else u
+            else:
+                current = -u if drift and late else u
             pairs = rng.choice(n_pairs, pairs_per_event, replace=False)
             rows["animal"] += [a] * len(pairs)
             rows["pair"] += pairs.tolist()
@@ -79,7 +83,7 @@ def test_I0_planted_individual_latent_passes_I0_1_and_I0_2(small):
     assert result["r_star"] in (2, 4)
     chron = result["gain_over_pop"]["chronological"]
     assert chron["factor-2"]["mean"] > 3 * chron["factor-1"]["mean"]
-    assert gates["I0-3"]["verdict"] == "durable_over_session"
+    assert gates["I0-3"]["verdict"] == "durable"
 
 
 def test_I0_no_individual_state_fails_I0_1(small):
@@ -89,4 +93,12 @@ def test_I0_no_individual_state_fails_I0_1(small):
 
 def test_I0_drifting_latent_is_flagged_by_I0_3(small):
     table, events = _synthetic(drift=True)
-    assert _run(table, events)["gates"]["I0-3"]["verdict"] == "drifts_within_session"
+    assert _run(table, events)["gates"]["I0-3"]["verdict"] == "drifts"
+
+
+def test_I0_3_partial_drift_inside_margin_is_not_called_durable(small):
+    # Half the latent decays after mid-session: persistence ratio near 0.5.
+    table, events = _synthetic(drift="partial")
+    verdict = _run(table, events)["gates"]["I0-3"]
+    assert verdict["verdict"] != "durable"
+    assert verdict["ratio_interval"][0] < I.DRIFT_MARGIN
