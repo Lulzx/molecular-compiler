@@ -82,7 +82,7 @@ to B0.
 | `molc traces-ingest` | Converts the OSF trace export into per-event response windows | `data/worm/responses/` |
 | `molc phase1-audit` | Pre-training audit. Reads no targets. Reports the library, family recovery, K3, the resting state, and edges net-inhibitory at rest | `artifacts/phase1/audit.json` |
 | `molc phase1-convergence` | The Section 12.6 test on the untrained model: halve dt, then separately add two compartments | `artifacts/phase1/convergence.json` |
-| `molc phase1-convergence --trained F.json` | The same test with a base fold's trained parameters (required before acceptance) | `artifacts/phase1/convergence-trained.json` |
+| `molc phase1-convergence --trained F.json` | The same test with a base fold's trained parameters, run on every base fold (required before acceptance) | `artifacts/phase1/convergence-trained-<fold>.json` |
 | `molc phase1-fold --fold F [--variant V]` | Trains one frozen fold, base or variant `cl3`/`cl8`/`hill1`. Checkpoints after every step and resumes from a matching checkpoint. Records the monitor loss and the training-convergence verdict | `artifacts/phase1/<split>[-V]-fold<F>.json`, `.ckpt` |
 | `molc phase1-report` | Refits B0, B1 and B2 on the same folds and pools held-out predictions. Reports metrics, ceilings, paired cluster bootstrap intervals (2,000 draws), the Section 9.3 verdict and its interpretation under the training-adequacy rule, gauge-invariant metrics and the M10 residual analysis. Completed variants appear under `sensitivity` | `artifacts/phase1/phase1-report.json` |
 | `molc heldout-animals` | Exploratory (`pre_registered: false`). Phase 0 linear-response models fit on training animals and scored on held-out animals | `artifacts/phase1/held-out-animals.json` |

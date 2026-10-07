@@ -988,6 +988,10 @@ def convergence_test(
     report["data_tier"] = "restricted"
     out = Path(output)
     out.mkdir(parents=True, exist_ok=True)
-    name = "convergence.json" if trained is None else "convergence-trained.json"
+    name = (
+        "convergence.json"
+        if trained is None
+        else f"convergence-trained-{Path(trained).stem}.json"
+    )
     _dump(out / name, report)
     return report

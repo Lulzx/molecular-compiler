@@ -5,7 +5,7 @@
 #
 #   1. wait for a running `molc individual-state` (Track I0) to finish;
 #   2. base leave_class_out folds, three at a time;
-#   3. Section 12.6 convergence on the trained fold 0, then the report;
+#   3. Section 12.6 convergence on every trained base fold, then the report;
 #   4. assumption variants (cl3, cl8, hill1) on the same folds, then the report.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,8 +28,10 @@ export STEPS LOGS
 
 echo "base folds"
 printf 'base %s\n' 0 1 2 3 4 | xargs -P "$PARALLEL" -n 2 bash -c 'fold "$0" "$1"'
-uv run molc phase1-convergence --trained artifacts/phase1/leave_class_out-fold0.json \
-  >"$LOGS/convergence-trained.log" 2>&1
+for f in 0 1 2 3 4; do
+  uv run molc phase1-convergence --trained "artifacts/phase1/leave_class_out-fold$f.json" \
+    >"$LOGS/convergence-trained-fold$f.log" 2>&1
+done
 uv run molc phase1-report >"$LOGS/report-base.log" 2>&1
 echo "base report written"
 
