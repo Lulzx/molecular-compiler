@@ -140,6 +140,34 @@ def _indices(graph):
     return genes, classes, ortholog
 
 
+def _skeleton_geometry(skeletons, syn, id_index, policy, resting, path, diam):
+    """Opt-in M6 morphology: per-synapse path, diameter and compartment from trees."""
+    path, diam = np.array(path), np.array(diam)
+    compartment = np.zeros(len(syn), dtype=np.int32)
+    has = np.zeros(len(syn), dtype=bool)
+    resting = np.asarray(resting)
+    reductions = {}
+    for s, row in enumerate(syn):
+        tree = skeletons.get(row["post_id"])
+        if tree is None:
+            continue
+        i = id_index[row["post_id"]]
+        if i not in reductions:
+            # Same lambda0 as the compiler's per-synapse length constant.
+            lam0 = policy.length_constant_um * np.sqrt(policy.leak_nS / resting[i])
+            reductions[i] = tree.reduce(policy.n_comp, lam0)
+        node = tree.nearest_node(row["xyz"])
+        path[s], diam[s] = tree.path_um[node], 2 * tree.radius[node]
+        compartment[s] = reductions[i].node_compartment[node]
+        has[s] = True
+    return (
+        jnp.asarray(path),
+        jnp.asarray(diam),
+        jnp.asarray(compartment),
+        jnp.asarray(has),
+    )
+
+
 def _compile(
     graph,
     rules,
@@ -148,6 +176,7 @@ def _compile(
     resolution=None,
     identity_sample=None,
     identity_deviation=None,
+    skeletons=None,
 ):
     policy = resolution or ResolutionPolicy.default(graph.metadata["species"])
     state = state or ModulatoryState()
@@ -303,6 +332,11 @@ def _compile(
     resting = policy.leak_nS + (
         density[:, channel_indices] * jnp.asarray([r.conductance for r in ch_records])
     ).sum(axis=1)
+    skeleton_comp = None
+    if skeletons:
+        path, diam, skeleton_comp, has_skeleton = _skeleton_geometry(
+            skeletons, syn, id_index, policy, resting, path, diam
+        )
     length = policy.length_constant_um * jnp.sqrt(
         jnp.maximum(diam, 1e-6) * policy.leak_nS / resting[post]
     )
@@ -310,6 +344,8 @@ def _compile(
     compartment = jnp.minimum(
         jnp.floor(path / jnp.maximum(length, 1e-6)).astype(jnp.int32), comp - 1
     )
+    if skeleton_comp is not None:
+        compartment = jnp.where(has_skeleton, skeleton_comp, compartment)
     features = jnp.column_stack(
         [path / 100, diam, jnp.asarray([r["size"] for r in syn])]
     )
@@ -527,14 +563,29 @@ def _compile(
         [edge for bucket in pre_buckets for edge in bucket], dtype=jnp.int32
     )
     result.recompile = lambda delta: _compile(
-        graph, rules, kinetics, state, policy, identity_sample, delta
+        graph, rules, kinetics, state, policy, identity_sample, delta, skeletons
     )
     return result
 
 
-def compile(graph, rules, kinetics, state=None, resolution=None, identity_sample=None):
-    """M4-M7. Compile with residuals disabled; adapters are explicit on rules."""
-    return _compile(graph, rules, kinetics, state, resolution, identity_sample)
+def compile(
+    graph,
+    rules,
+    kinetics,
+    state=None,
+    resolution=None,
+    identity_sample=None,
+    skeletons=None,
+):
+    """M4-M7. Compile with residuals disabled; adapters are explicit on rules.
+
+    `skeletons` maps neuron_id to a `SkeletonTree`. Synapses onto those neurons
+    take path distance, diameter and compartment from the nearest skeleton node
+    (electrotonic binning); all others keep the supplied values.
+    """
+    return _compile(
+        graph, rules, kinetics, state, resolution, identity_sample, skeletons=skeletons
+    )
 
 
 def attach_residuals(sim, epsilon, delta=None, sigma2=1.0):
