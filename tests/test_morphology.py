@@ -205,3 +205,72 @@ def test_M6_skeletons_under_grad_raise_a_clear_error(system):
 
     with pytest.raises(TypeError, match="concrete channel densities"):
         jax.grad(loss)(rules.params)
+
+
+def _tapered_skeletons(graph):
+    # Fat soma, long thin process: unequal compartment areas.
+    out = {}
+    for r in graph.connectome.synapses.to_pylist():
+        x = r["xyz"][0]
+        out[r["post_id"]] = SkeletonTree.from_arrays(
+            [0, 1, 2, 3],
+            [1, 3, 3, 3],
+            [(x - 600, 0, 0), (x - 300, 0, 0), (x, 0, 0), (x + 300, 0, 0)],
+            [3.0, 0.5, 0.3, 0.3],
+            [-1, 0, 1, 2],
+        )
+    return out
+
+
+def test_M6_per_compartment_capacitance_leak_and_axial_from_reduction(system):
+    graph, rules, kinetics = system
+    policy = ResolutionPolicy.default("C. elegans")
+    base = compile(graph, rules, kinetics, resolution=policy)
+    assert "axial" not in base.neuron_params
+    skeletons = _tapered_skeletons(graph)
+    sk = compile(graph, rules, kinetics, resolution=policy, skeletons=skeletons)
+    cap = np.asarray(sk.neuron_params["capacitance"])
+    assert not np.allclose(cap, policy.capacitance_pF)
+    np.testing.assert_allclose(cap.sum(axis=1), policy.capacitance_pF * policy.n_comp)
+    ratio = cap / policy.capacitance_pF
+    np.testing.assert_allclose(sk.neuron_params["leak"] / policy.leak_nS, ratio)
+    axial = np.asarray(sk.neuron_params["axial"])
+    assert axial.shape == (len(graph.neuron_ids), policy.n_comp - 1)
+    assert np.all(axial > 0) and not np.allclose(axial, policy.axial_nS)
+
+
+def test_M6_skeleton_neurons_only_and_solvers_agree(system):
+    from dataclasses import replace
+
+    graph, rules, kinetics = system
+    first = next(iter(_tapered_skeletons(graph)))
+    partial = {first: _tapered_skeletons(graph)[first]}
+    policy = ResolutionPolicy.default("C. elegans")
+    base = compile(graph, rules, kinetics, resolution=policy)
+    sk = compile(graph, rules, kinetics, resolution=policy, skeletons=partial)
+    row = graph.neuron_ids.tolist().index(first)
+    other = np.arange(len(graph.neuron_ids)) != row
+    np.testing.assert_array_equal(
+        np.asarray(sk.neuron_params["capacitance"])[other],
+        np.asarray(base.neuron_params["capacitance"])[other],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(sk.neuron_params["axial"])[other],
+        np.full((other.sum(), policy.n_comp - 1), policy.axial_nS),
+    )
+    assert not np.allclose(
+        sk.neuron_params["capacitance"][row], base.neuron_params["capacitance"][row]
+    )
+    from molecular_compiler import Stimulus, simulate
+
+    n = len(graph.neuron_ids)
+    currents = np.zeros((40, n))
+    currents[5:20, 0] = 50.0
+    runs = {}
+    for method in ("dense", "pcg"):
+        p = replace(policy, solver=method, solve_tolerance=1e-10)
+        sim = compile(graph, rules, kinetics, resolution=p, skeletons=partial)
+        runs[method] = simulate(
+            sim, Stimulus(currents=currents), 40 * policy.dt_s
+        ).voltage
+    np.testing.assert_allclose(runs["dense"], runs["pcg"], atol=1e-4)

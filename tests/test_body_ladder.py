@@ -166,6 +166,52 @@ def test_M13_L4_returns_sensory_and_modulator_targets():
         )
 
 
+def _l4(system, feeding, tau_s=0.002):
+    names = ["DVA", "DB1", "VB1", "AVAL"]
+    return InteroceptiveLoop(
+        names,
+        sensory_gain_pA=1.0,
+        interoception_fn=lambda t, state: np.array([feeding(t)]),
+        gain=[[5.0], [5.0]],
+        baseline=[0.0, 0.0],
+    )
+
+
+def test_M4_M13_L4_body_drives_modulator_concentrations(system):
+    from molecular_compiler.compiler import ModulatoryState
+
+    graph, rules, kinetics = system
+    sim = compile(graph, rules, kinetics, state=ModulatoryState((0.0, 0.0)))
+    stimulus, duration = Stimulus(), 0.006
+    l3 = simulate(
+        sim,
+        stimulus,
+        duration,
+        body=ProprioceptiveLoop(["DVA", "DB1", "VB1", "AVAL"], sensory_gain_pA=1.0),
+    )
+    fed = _l4(system, lambda t: 0.0)
+    flat = simulate(sim, stimulus, duration, body=fed, modulator_tau_s=0.002)
+    # Targets equal the compiled constants: identical to the L3 body.
+    np.testing.assert_array_equal(flat.signaling, l3.signaling)
+    switch = lambda t: 0.0 if t < 0.003 else 1.0
+    feeding = simulate(
+        sim, stimulus, duration, body=_l4(system, switch), modulator_tau_s=0.002
+    )
+    assert np.all(np.isfinite(feeding.signaling))
+    np.testing.assert_array_equal(feeding.signaling[:6], l3.signaling[:6])
+    assert not np.allclose(feeding.signaling[-1], l3.signaling[-1])
+    with pytest.raises(ValueError, match="modulator targets"):
+        simulate(compile(graph, rules, kinetics), stimulus, duration, body=fed)
+
+
+def test_M13_L4_without_body_output_leaves_concentrations_constant(system):
+    sim = compile(*system)
+    loop = ProprioceptiveLoop(["DVA", "DB1", "VB1", "AVAL"], sensory_gain_pA=1.0)
+    a = simulate(sim, Stimulus(), 0.003, body=loop)
+    b = simulate(sim, Stimulus(), 0.003, body=sensory_only(_l4(system, lambda t: 1.0)))
+    np.testing.assert_array_equal(a.signaling, b.signaling)
+
+
 def test_M13_L5_requires_configured_backend():
     args = {"n_neurons": 3, "motor_indices": (0,), "sensory_indices": (2,)}
     with pytest.raises(BodyNotConfigured, match="executable"):

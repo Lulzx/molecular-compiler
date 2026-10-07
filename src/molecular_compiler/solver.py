@@ -17,10 +17,18 @@ def coupling_edges(sim):
     return (
         jnp.concatenate([left, sim.gap["i"] * c]),
         jnp.concatenate([right, sim.gap["j"] * c]),
-        jnp.concatenate(
-            [jnp.full(left.shape, sim.resolution.axial_nS), sim.gap["conductance"]]
-        ),
+        jnp.concatenate([_axial(sim, left.shape), sim.gap["conductance"]]),
     )
+
+
+def _axial(sim, shape):
+    """Per-link axial conductance (nS), flat [n*(c-1)]; M6 per-neuron values
+    from `neuron_params["axial"]` when compiled with skeletons, else the policy
+    scalar."""
+    axial = sim.neuron_params.get("axial")
+    if axial is None:
+        return jnp.full(shape, sim.resolution.axial_nS)
+    return axial.ravel()
 
 
 def laplacian_product(x, i, j, g):
@@ -93,19 +101,11 @@ def voltage_solve(sim, diagonal, rhs, old_voltage):
             .add(sim.gap["conductance"])
         )
         blocks += jax.vmap(jnp.diag)(gap_diag.reshape(n, c))
+        axial = sim.neuron_params.get("axial")
         for k in range(c - 1):
-            blocks = (
-                blocks.at[:, k, k]
-                .add(policy.axial_nS)
-                .at[:, k + 1, k + 1]
-                .add(policy.axial_nS)
-            )
-            blocks = (
-                blocks.at[:, k, k + 1]
-                .add(-policy.axial_nS)
-                .at[:, k + 1, k]
-                .add(-policy.axial_nS)
-            )
+            a = policy.axial_nS if axial is None else axial[:, k].astype(blocks.dtype)
+            blocks = blocks.at[:, k, k].add(a).at[:, k + 1, k + 1].add(a)
+            blocks = blocks.at[:, k, k + 1].add(-a).at[:, k + 1, k].add(-a)
         factors = jnp.linalg.cholesky(blocks)
 
         def precondition(r):

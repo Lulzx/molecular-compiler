@@ -154,15 +154,17 @@ def _skeleton_geometry(skeletons, syn, id_index, policy, resting, path, diam):
         )
     resting = np.asarray(resting)
     reductions = {}
+    for neuron_id, tree in skeletons.items():
+        i = id_index.get(neuron_id)
+        if i is not None:
+            # Same lambda0 as the compiler's per-synapse length constant.
+            lam0 = policy.length_constant_um * np.sqrt(policy.leak_nS / resting[i])
+            reductions[i] = tree.reduce(policy.n_comp, lam0)
     for s, row in enumerate(syn):
         tree = skeletons.get(row["post_id"])
         if tree is None:
             continue
         i = id_index[row["post_id"]]
-        if i not in reductions:
-            # Same lambda0 as the compiler's per-synapse length constant.
-            lam0 = policy.length_constant_um * np.sqrt(policy.leak_nS / resting[i])
-            reductions[i] = tree.reduce(policy.n_comp, lam0)
         node = tree.nearest_node(row["xyz"])
         path[s], diam[s] = tree.path_um[node], 2 * tree.radius[node]
         compartment[s] = reductions[i].node_compartment[node]
@@ -172,7 +174,31 @@ def _skeleton_geometry(skeletons, syn, id_index, policy, resting, path, diam):
         jnp.asarray(diam),
         jnp.asarray(compartment),
         jnp.asarray(has),
+        reductions,
     )
+
+
+def _skeleton_compartments(reductions, n, policy):
+    """Per-compartment capacitance, leak and axial links (nS) from reductions.
+
+    Capacitance and leak scale by area / mean area (so a neuron's total is
+    unchanged); compartments with no membrane keep a 1e-3 floor, renormalized. Axial links
+    are the reduction's conductances; across skipped compartments m links of
+    m*g are in series, and links past the last occupied compartment reuse its
+    last conductance. Neurons without a reduction keep the policy values."""
+    c = policy.n_comp
+    scale = np.ones((n, c))
+    axial = np.full((n, c - 1), policy.axial_nS)
+    for i, red in reductions.items():
+        floored = np.maximum(red.area_um2 / red.area_um2.mean(), 1e-3)
+        scale[i] = floored * c / floored.sum()
+        occ, g = red.occupied, red.axial_S * 1e9
+        if len(g):
+            axial[i] = g[-1]
+            for k, g_k in enumerate(g):
+                m = occ[k + 1] - occ[k]
+                axial[i, occ[k] : occ[k + 1]] = g_k * m
+    return scale, axial
 
 
 def _compile(
@@ -339,9 +365,9 @@ def _compile(
     resting = policy.leak_nS + (
         density[:, channel_indices] * jnp.asarray([r.conductance for r in ch_records])
     ).sum(axis=1)
-    skeleton_comp = None
+    skeleton_comp = reductions = None
     if skeletons:
-        path, diam, skeleton_comp, has_skeleton = _skeleton_geometry(
+        path, diam, skeleton_comp, has_skeleton, reductions = _skeleton_geometry(
             skeletons, syn, id_index, policy, resting, path, diam
         )
     length = policy.length_constant_um * jnp.sqrt(
@@ -497,6 +523,14 @@ def _compile(
         metadata["sign_audit"]["ambiguous_fraction"] = (
             float(jnp.mean(ambiguous)) if len(syn) else 0.0
         )
+    capacitance = jnp.full((n, comp), policy.capacitance_pF)
+    leak = jnp.full((n, comp), policy.leak_nS)
+    axial = {}
+    if skeletons and reductions:
+        scale, axial_nS = _skeleton_compartments(reductions, n, policy)
+        capacitance = capacitance * jnp.asarray(scale)
+        leak = leak * jnp.asarray(scale)
+        axial = {"axial": jnp.asarray(axial_nS)}
     inputs_dim = 1 + len(state.concentrations) + len(state.signaling) + 1
     surrogates = tuple(
         Surrogate("full", tuple([-np.inf] * inputs_dim), tuple([np.inf] * inputs_dim))
@@ -511,8 +545,9 @@ def _compile(
             "receptor_reversal": jnp.stack([reversal(r) for r in rec_records], axis=1)
             if rec_records
             else jnp.zeros((n, 0)),
-            "capacitance": jnp.full((n, comp), policy.capacitance_pF),
-            "leak": jnp.full((n, comp), policy.leak_nS),
+            "capacitance": capacitance,
+            "leak": leak,
+            **axial,
             "type_index": jnp.argmax(graph.assignments, axis=1),
             "z": z,
             "chloride": inside["Cl"],

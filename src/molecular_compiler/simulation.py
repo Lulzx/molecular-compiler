@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .body_ladder import BodyOutput
 from .kinetics import binding_step, rush_larsen
 from .solver import voltage_solve
 
@@ -291,8 +292,10 @@ def _synapse_state(sim, old, activity, spikes, event_time, event):
     )
 
 
-def _modulatory(sim, old, activity, current):
-    """Peptide, slow signaling, drive and surrogate inputs; no channel kinetics."""
+def _modulatory(sim, old, activity, current, concentration=None):
+    """Peptide, slow signaling, drive and surrogate inputs; no channel kinetics.
+
+    `concentration` (opt-in, L4) overrides the compiled global modulator c."""
     dt, n = sim.resolution.dt_s, sim.n_neurons
     released_peptides = sim.neuromod["release"] * activity[:, None]
     if sim.neuromod["mode"] == "global":
@@ -315,7 +318,8 @@ def _modulatory(sim, old, activity, current):
         dt,
     )
     peptide_drive = (peptide_open * sim.neuromod["sensitivity"]).sum(axis=1)
-    concentration = sim.neuromod["concentrations"]
+    if concentration is None:
+        concentration = sim.neuromod["concentrations"]
     slow_target = sim.neuromod["mod_sensitivity"] * (
         concentration.sum() + released_peptides.sum() / max(n, 1)
     )
@@ -472,7 +476,7 @@ def _front(sim, old, event, synapses=None):
     return activity, spike_above, event_time, state, None
 
 
-def _hybrid_step(sim, old, current, event=False, synapses=None):
+def _hybrid_step(sim, old, current, event=False, synapses=None, concentration=None):
     """Reference: full kinetics always run; surrogate output replaces the result."""
     dt, n = sim.resolution.dt_s, sim.n_neurons
     v = old.voltage
@@ -481,7 +485,7 @@ def _hybrid_step(sim, old, current, event=False, synapses=None):
     )
     receptors, resources, facilitation, last_release_time, cached_g, cached_b = synapses
     peptide_open, peptide_field, signaling, modulation, drive, inputs = _modulatory(
-        sim, old, activity, current
+        sim, old, activity, current, concentration
     )
     gates = (
         jnp.stack(
@@ -540,7 +544,7 @@ def _hybrid_step(sim, old, current, event=False, synapses=None):
     return new, (voltage, calcium, signaling, residual, iterations, fallback)
 
 
-def _surrogate_step(sim, old, current):
+def _surrogate_step(sim, old, current, concentration=None):
     """Fast branch, taken only when no eligible neuron left its envelope.
 
     Eligible neurons take the surrogate update and skip gate stepping, channel
@@ -556,7 +560,7 @@ def _surrogate_step(sim, old, current):
     activity, spike_above, event_time, synapses, _ = _front(sim, old, False)
     receptors, resources, facilitation, last_release_time = synapses[:4]
     peptide_open, peptide_field, signaling, modulation, drive, inputs = _modulatory(
-        sim, old, activity, current
+        sim, old, activity, current, concentration
     )
     predicted_state, _, fallback = _surrogate_predictions(sim, old, inputs)
     gates = old.gates
@@ -597,6 +601,11 @@ def _surrogate_step(sim, old, current):
             },
             partition_plan=None,
             schwarz_layout=None,
+            neuron_params={
+                k: sim.neuron_params[k][full]
+                for k in ("axial",)
+                if k in sim.neuron_params
+            },
         )
         boundary_g = gap["conductance"][contact].astype(diagonal.dtype)
         diagonal = diagonal.at[local, 0].add(boundary_g)
@@ -647,18 +656,21 @@ def _surrogate_step(sim, old, current):
     return new, (voltage, calcium, signaling, residual, iterations, fallback)
 
 
-def step(sim, old, current, event=False, synapses=None):
+def step(sim, old, current, event=False, synapses=None, concentration=None):
     """One timestep. `synapses` is an opt-in callable replacing the synaptic
-    update and accumulation (distributed.distributed_synapses)."""
+    update and accumulation (distributed.distributed_synapses). `concentration`
+    is an opt-in time-varying modulator vector c(t) (L4 interoception)."""
     plan = sim.fast_plan
     if synapses is not None:
         if event:
             raise ValueError("distributed synapses do not support event mode")
         if plan is not None and len(plan.surrogate_idx):
             raise ValueError("distributed synapses do not support fast surrogates")
-        return _hybrid_step(sim, old, current, synapses=synapses)
+        return _hybrid_step(
+            sim, old, current, synapses=synapses, concentration=concentration
+        )
     if plan is None or not len(plan.surrogate_idx):
-        return _hybrid_step(sim, old, current, event=event)
+        return _hybrid_step(sim, old, current, event=event, concentration=concentration)
     if event:
         raise ValueError("fast surrogate execution does not support event mode")
     # Per-neuron masking cannot skip work under static shapes, so neurons are
@@ -667,7 +679,7 @@ def step(sim, old, current, event=False, synapses=None):
     # exit is logged. lax.cond differentiates through the branch taken, and
     # becomes a select (both branches run) under vmap.
     activity = jax.nn.sigmoid((old.voltage[:, 0] + 35) / 5)
-    inputs = _modulatory(sim, old, activity, current)[-1]
+    inputs = _modulatory(sim, old, activity, current, concentration)[-1]
     exits = jnp.zeros((), dtype=bool)
     for type_id, surrogate in enumerate(sim.surrogates):
         if surrogate.family == "full":
@@ -676,12 +688,12 @@ def step(sim, old, current, event=False, synapses=None):
         exits |= jnp.any(mine & ~surrogate.inside(inputs))
 
     def hybrid(_):
-        return _hybrid_step(sim, old, current)
+        return _hybrid_step(sim, old, current, concentration=concentration)
 
     shapes = jax.eval_shape(hybrid, None)
 
     def fast(_):
-        out = _surrogate_step(sim, old, current)
+        out = _surrogate_step(sim, old, current, concentration)
         return jax.tree.map(lambda x, s: x.astype(s.dtype), out, shapes)
 
     return jax.lax.cond(exits, hybrid, fast, None)
@@ -740,8 +752,20 @@ def _parallel(sim, state0, currents):
 
 
 def simulate(
-    sim, stimulus, duration_s, mode="sequential", body=None, seed=0, state0=None
+    sim,
+    stimulus,
+    duration_s,
+    mode="sequential",
+    body=None,
+    seed=0,
+    state0=None,
+    modulator_tau_s=1.0,
 ):
+    """Run the simulation. A closed-loop `body` returning BodyOutput (L4) also
+    drives the global modulator concentrations: c relaxes exponentially toward
+    the body's targets with time constant `modulator_tau_s` (c starts at the
+    compiled concentrations). Bodies returning only sensory currents leave c
+    at its compiled constant."""
     if mode not in {"sequential", "event", "parallel"}:
         raise ValueError("unknown execution mode")
     if not np.isfinite(duration_s) or duration_s <= 0:
@@ -760,14 +784,32 @@ def simulate(
     if body is not None:
         sensory = body.reset({"seed": seed})
         state, output = state0, []
+        c = None
+        c_fixed = sim.neuromod["concentrations"]
         for current in currents:
+            if isinstance(sensory, BodyOutput):
+                target = jnp.asarray(sensory.modulator_targets, dtype=c_fixed.dtype)
+                if target.shape != c_fixed.shape:
+                    raise ValueError(
+                        "body modulator targets must match compiled concentrations"
+                    )
+                c = rush_larsen(
+                    c_fixed if c is None else c,
+                    jax.lax.stop_gradient(target),
+                    modulator_tau_s,
+                    sim.resolution.dt_s,
+                )
+                sensory = sensory.sensory
             sensory_current = jnp.asarray(sensory)
             if sensory_current.shape != (sim.n_neurons,):
                 raise ValueError(
                     "body sensory mapping must return one current per neuron"
                 )
             state, result = step(
-                sim, state, current + jax.lax.stop_gradient(sensory_current)
+                sim,
+                state,
+                current + jax.lax.stop_gradient(sensory_current),
+                concentration=c,
             )
             output.append(result)
             sensory = body.step(
