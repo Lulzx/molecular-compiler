@@ -175,3 +175,34 @@ def synthetic_system(n=4, seed=0, species="C. elegans"):
             ),
         ),
     )
+
+
+def synthetic_surrogates(sim, types=None, upper_drive=np.inf, conditioned=True):
+    """Relaxation-to-rest surrogates attached to `types` (all if None); synthetic only."""
+    from dataclasses import replace
+
+    from .surrogates import Surrogate
+
+    width = len(sim.surrogates[0].lower)
+    coefficients = np.zeros((1 + 4 + width, 4))
+    rest = sim.resolution.leak_reversal_mV
+    coefficients[0, 0] = 50 * rest  # bias
+    coefficients[1, 0] = -50.0  # voltage relaxes to rest
+    coefficients[2, 1] = -20.0  # calcium decays
+    coefficients[5, 0] = 0.5  # drive input (first input column)
+    lower = (-np.inf,) * width
+    upper = (upper_drive,) + (np.inf,) * (width - 1)
+    surrogates = tuple(
+        Surrogate(
+            "fixed_ode",
+            lower,
+            upper,
+            tuple(map(tuple, coefficients)),
+            heldout_error=0.0,
+            conditioned=conditioned,
+        )
+        if types is None or index in types
+        else previous
+        for index, previous in enumerate(sim.surrogates)
+    )
+    return replace(sim, surrogates=surrogates)

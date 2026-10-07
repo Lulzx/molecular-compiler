@@ -178,3 +178,64 @@ def reduce_graph(sim, samples, heldout_samples, rollout_validator, tolerance=0.0
             "surrogate_rollout_validated": True,
         },
     )
+
+
+@dataclass(frozen=True)
+class FastPlan:
+    """Static neuron partition for the opt-in fast backend."""
+
+    eligible: np.ndarray  # [N] bool: validated surrogate usable in this state
+    surrogate_idx: np.ndarray
+    full_idx: np.ndarray
+    local: np.ndarray  # global neuron -> index within full_idx (-1 if eligible)
+    gap_full_full: np.ndarray  # contacts kept in the reduced solve
+    gap_full_surrogate: tuple  # (contact, full-local end, surrogate global end)
+
+
+def plan_fast_execution(sim):
+    """Opt in to fast execution: eligible neurons skip full kinetics (M7).
+
+    Eligible means a validated non-full surrogate that is conditioned or runs in the
+    default modulatory state (M7-R4). All other neurons keep full dynamics. Without
+    a plan, simulation uses the hybrid reference.
+    """
+    from dataclasses import replace
+
+    if sim.partition_plan is not None or sim.schwarz_layout is not None:
+        raise ValueError("fast surrogate execution needs the single-device solve")
+    types = np.asarray(sim.neuron_params["type_index"])
+    usable = np.array(
+        [
+            s.family != "full" and (s.conditioned or not sim.neuromod["nondefault"])
+            for s in sim.surrogates
+        ]
+    )
+    eligible = usable[types]
+    full_idx, surrogate_idx = np.flatnonzero(~eligible), np.flatnonzero(eligible)
+    local = np.full(len(types), -1)
+    local[full_idx] = np.arange(len(full_idx))
+    i, j = np.asarray(sim.gap["i"]), np.asarray(sim.gap["j"])
+    both = np.flatnonzero(~eligible[i] & ~eligible[j])
+    i_full = np.flatnonzero(~eligible[i] & eligible[j])
+    j_full = np.flatnonzero(eligible[i] & ~eligible[j])
+    plan = FastPlan(
+        eligible,
+        surrogate_idx,
+        full_idx,
+        local,
+        both,
+        (
+            np.concatenate([i_full, j_full]),
+            local[np.concatenate([i[i_full], j[j_full]])],
+            np.concatenate([j[i_full], i[j_full]]),
+        ),
+    )
+    return replace(
+        sim,
+        fast_plan=plan,
+        metadata={
+            **sim.metadata,
+            "surrogate_execution": "fast",
+            "fast_surrogate_neurons": len(surrogate_idx),
+        },
+    )
