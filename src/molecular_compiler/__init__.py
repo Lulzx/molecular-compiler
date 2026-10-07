@@ -23,6 +23,7 @@ from .experiments import (
     propose_experiments,
 )
 from .kinetics import KineticRecord, KineticsLibrary
+from .morphology import SkeletonTree
 from .observation import ObservationModel, Recording, observe
 from .rules import RuleNetwork
 from .simulation import Stimulus, Trajectory, simulate
@@ -46,6 +47,7 @@ __all__ = [
     "RuleEnsemble",
     "RuleNetwork",
     "SimGraph",
+    "SkeletonTree",
     "Split",
     "Stimulus",
     "Trajectory",
