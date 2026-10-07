@@ -194,6 +194,10 @@ def halo_exchange(plan, values):
 def distributed_voltage_solve(sim, plan, diagonal, rhs, old_voltage):
     from .solver import pcg
 
+    if "axial" in sim.neuron_params:
+        raise NotImplementedError(
+            "distributed solve does not support per-neuron axial conductances"
+        )
     d, local, c = plan.partitions, plan.local_size, sim.resolution.n_comp
     size = d * local
 
