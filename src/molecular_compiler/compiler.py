@@ -145,6 +145,12 @@ def _skeleton_geometry(skeletons, syn, id_index, policy, resting, path, diam):
     path, diam = np.array(path), np.array(diam)
     compartment = np.zeros(len(syn), dtype=np.int32)
     has = np.zeros(len(syn), dtype=bool)
+    if isinstance(resting, jax.core.Tracer):
+        # Reduction bisects on concrete conductances; it cannot run under grad.
+        raise TypeError(
+            "skeleton compartment reduction needs concrete channel densities; "
+            "compile with skeletons outside jax transformations"
+        )
     resting = np.asarray(resting)
     reductions = {}
     for s, row in enumerate(syn):

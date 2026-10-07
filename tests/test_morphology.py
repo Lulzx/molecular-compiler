@@ -191,3 +191,17 @@ def test_M6_compile_default_has_no_skeleton_effect(system):
     for other in (b, c):
         for key in a.syn_params:
             np.testing.assert_array_equal(other.syn_params[key], a.syn_params[key])
+
+
+def test_M6_skeletons_under_grad_raise_a_clear_error(system):
+    import jax
+
+    graph, rules, kinetics = system
+    skeletons = _straight_skeletons(graph)
+
+    def loss(params):
+        sim = compile(graph, rules.with_params(params), kinetics, skeletons=skeletons)
+        return sim.syn_params["gate"].sum()
+
+    with pytest.raises(TypeError, match="concrete channel densities"):
+        jax.grad(loss)(rules.params)
