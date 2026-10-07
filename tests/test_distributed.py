@@ -46,3 +46,53 @@ print("two virtual CPU devices: halo and PCG match dense reference")
         check=False,
     )
     assert process.returncode == 0, process.stdout + process.stderr
+
+
+def test_C_R3_two_device_partitioned_synapses_match_single_step():
+    script = r"""
+import jax.numpy as jnp
+import numpy as np
+from dataclasses import replace
+from molecular_compiler import compile, ResolutionPolicy
+from molecular_compiler.fixtures import synthetic_system
+from molecular_compiler.distributed import (
+    partition_graph, distributed_step, synaptic_state_bytes)
+import jax
+from molecular_compiler.simulation import initial_state, step
+for mode in ("spiking", "graded"):
+    policy = replace(ResolutionPolicy.default(), solver="dense", solve_tolerance=1e-10,
+                     release_mode=mode)
+    sim = compile(*synthetic_system(6), resolution=policy)
+    plan = partition_graph(sim)
+    assert plan.partitions == 2
+    pre, post = np.asarray(sim.syn_pre_idx), np.asarray(sim.syn_post_idx)
+    assert np.any(pre // plan.local_size != post // plan.local_size), "no cross-device synapse"
+    assert int(plan.syn_counts.sum()) == len(pre)
+    assert sum(synaptic_state_bytes(sim, plan)) > 0
+    ref = dist = initial_state(sim)
+    run_ref = jax.jit(lambda s, c: step(sim, s, c))
+    run_dist = jax.jit(lambda s, c: distributed_step(sim, plan, s, c))
+    for k in range(4):
+        # Drive hard enough that spiking mode actually releases.
+        current = jnp.full(6, 3000.0 if k < 2 else 0.0)
+        ref, _ = run_ref(ref, current)
+        dist, _ = run_dist(dist, current)
+        for a, b in zip(ref, dist):
+            np.testing.assert_allclose(np.asarray(a, float), np.asarray(b, float), atol=1e-8, rtol=1e-8)
+    assert float(jnp.abs(ref.receptors).max()) > 0, mode
+print("partitioned synapses match", synaptic_state_bytes(sim, plan))
+"""
+    env = dict(
+        os.environ,
+        JAX_ENABLE_X64="true",
+        XLA_FLAGS="--xla_force_host_platform_device_count=2",
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=400,
+        check=False,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr

@@ -215,7 +215,59 @@ def event_synapses(sim, old, spikes, now):
     return jax.lax.fori_loop(0, sim.n_neurons, neuron_event, initial)
 
 
-def step(sim, old, current, event=False):
+def synaptic_update(sim, state, params, source_events, source_activity):
+    """Dense STP/receptor update for any subset of synapses (also used per device)."""
+    dt = sim.resolution.dt_s
+    old_facilitation, old_resources, old_receptors = state
+    tau_rec, tau_fac, base_u = (params[k] for k in ("tau_rec", "tau_fac", "U"))
+    if sim.resolution.release_mode == "spiking":
+        u_before = rush_larsen(old_facilitation, base_u, tau_fac, dt)
+        x_before = rush_larsen(old_resources, 1.0, tau_rec, dt)
+        facilitation = jnp.where(
+            source_events, u_before + base_u * (1 - u_before), u_before
+        )
+        release = jnp.where(source_events, facilitation * x_before, 0.0)
+        resources = x_before - release
+        receptor_tau = jnp.asarray(
+            [
+                r.time_constant(sim.resolution.temperature_C)
+                for r in sim.receptor_records
+            ]
+        )
+        decayed = old_receptors * jnp.exp(-dt / receptor_tau)
+        receptors = decayed + release[:, None] * (1 - decayed)
+    else:
+        rate = 20 * source_activity
+        target_u = (base_u / tau_fac + base_u * rate) / (1 / tau_fac + base_u * rate)
+        facilitation = rush_larsen(
+            old_facilitation, target_u, 1 / (1 / tau_fac + base_u * rate), dt
+        )
+        resource_tau = 1 / (1 / tau_rec + facilitation * rate)
+        resources = rush_larsen(old_resources, resource_tau / tau_rec, resource_tau, dt)
+        release = facilitation * resources * source_activity
+        receptors = (
+            jnp.stack(
+                [
+                    binding_step(
+                        old_receptors[:, i],
+                        release,
+                        0.2,
+                        r.time_constant(sim.resolution.temperature_C),
+                        dt,
+                    )
+                    for i, r in enumerate(sim.receptor_records)
+                ],
+                axis=1,
+            )
+            if sim.receptor_records
+            else old_receptors
+        )
+    return facilitation, resources, receptors
+
+
+def step(sim, old, current, event=False, synapses=None):
+    """`synapses`: opt-in callable replacing synaptic update + accumulation
+    (see distributed.distributed_synapses); None keeps the single-device path."""
     dt, n, c = sim.resolution.dt_s, sim.n_neurons, sim.resolution.n_comp
     v = old.voltage
     # Graded release is a voltage-dependent rate, not a fixed synaptic sign.
@@ -225,61 +277,28 @@ def step(sim, old, current, event=False):
     event_time = old.event_time + dt
     last_release_time = old.last_release_time
     cached_g, cached_b = old.synaptic_conductance, old.synaptic_reversal_current
-    if event and sim.resolution.release_mode == "spiking":
+    if synapses is not None:
+        if event:
+            raise ValueError("distributed synapses do not support event mode")
+        (
+            receptors,
+            resources,
+            facilitation,
+            syn_by_receptor,
+            syn_reversal_by_receptor,
+        ) = synapses(sim, old, spikes, activity)
+    elif event and sim.resolution.release_mode == "spiking":
         receptors, resources, facilitation, last_release_time, cached_g, cached_b = (
             event_synapses(sim, old, spikes, event_time)
         )
     else:
-        tau_rec, tau_fac, base_u = (
-            sim.syn_params[k] for k in ("tau_rec", "tau_fac", "U")
+        facilitation, resources, receptors = synaptic_update(
+            sim,
+            (old.facilitation, old.resources, old.receptors),
+            sim.syn_params,
+            spikes[sim.syn_pre_idx],
+            activity[sim.syn_pre_idx],
         )
-        if sim.resolution.release_mode == "spiking":
-            source_events = spikes[sim.syn_pre_idx]
-            u_before = rush_larsen(old.facilitation, base_u, tau_fac, dt)
-            x_before = rush_larsen(old.resources, 1.0, tau_rec, dt)
-            facilitation = jnp.where(
-                source_events, u_before + base_u * (1 - u_before), u_before
-            )
-            release = jnp.where(source_events, facilitation * x_before, 0.0)
-            resources = x_before - release
-            receptor_tau = jnp.asarray(
-                [
-                    r.time_constant(sim.resolution.temperature_C)
-                    for r in sim.receptor_records
-                ]
-            )
-            decayed = old.receptors * jnp.exp(-dt / receptor_tau)
-            receptors = decayed + release[:, None] * (1 - decayed)
-        else:
-            rate = 20 * activity[sim.syn_pre_idx]
-            target_u = (base_u / tau_fac + base_u * rate) / (
-                1 / tau_fac + base_u * rate
-            )
-            facilitation = rush_larsen(
-                old.facilitation, target_u, 1 / (1 / tau_fac + base_u * rate), dt
-            )
-            resource_tau = 1 / (1 / tau_rec + facilitation * rate)
-            resources = rush_larsen(
-                old.resources, resource_tau / tau_rec, resource_tau, dt
-            )
-            release = facilitation * resources * activity[sim.syn_pre_idx]
-            receptors = (
-                jnp.stack(
-                    [
-                        binding_step(
-                            old.receptors[:, i],
-                            release,
-                            0.2,
-                            r.time_constant(sim.resolution.temperature_C),
-                            dt,
-                        )
-                        for i, r in enumerate(sim.receptor_records)
-                    ],
-                    axis=1,
-                )
-                if sim.receptor_records
-                else old.receptors
-            )
     gates = (
         jnp.stack(
             [
@@ -344,7 +363,9 @@ def step(sim, old, current, event=False):
         * open_channels
         * modulation[:, None, None]
     )
-    if event and sim.resolution.release_mode == "spiking":
+    if synapses is not None:
+        pass
+    elif event and sim.resolution.release_mode == "spiking":
         syn_g = None
         syn_by_receptor, syn_reversal_by_receptor = cached_g, cached_b
     else:
