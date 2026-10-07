@@ -220,16 +220,14 @@ def _take(array, rows):
     return array if rows is None else array[rows]
 
 
-def _synapse_state(sim, old, activity, spikes, event_time, event):
-    """Presynaptic STP and receptor updates for every edge."""
+def synaptic_update(sim, state, params, source_events, source_activity):
+    """Dense STP/receptor update for any subset of synapses (also used per device)."""
     dt = sim.resolution.dt_s
-    if event and sim.resolution.release_mode == "spiking":
-        return event_synapses(sim, old, spikes, event_time)
-    tau_rec, tau_fac, base_u = (sim.syn_params[k] for k in ("tau_rec", "tau_fac", "U"))
+    old_facilitation, old_resources, old_receptors = state
+    tau_rec, tau_fac, base_u = (params[k] for k in ("tau_rec", "tau_fac", "U"))
     if sim.resolution.release_mode == "spiking":
-        source_events = spikes[sim.syn_pre_idx]
-        u_before = rush_larsen(old.facilitation, base_u, tau_fac, dt)
-        x_before = rush_larsen(old.resources, 1.0, tau_rec, dt)
+        u_before = rush_larsen(old_facilitation, base_u, tau_fac, dt)
+        x_before = rush_larsen(old_resources, 1.0, tau_rec, dt)
         facilitation = jnp.where(
             source_events, u_before + base_u * (1 - u_before), u_before
         )
@@ -241,22 +239,22 @@ def _synapse_state(sim, old, activity, spikes, event_time, event):
                 for r in sim.receptor_records
             ]
         )
-        decayed = old.receptors * jnp.exp(-dt / receptor_tau)
+        decayed = old_receptors * jnp.exp(-dt / receptor_tau)
         receptors = decayed + release[:, None] * (1 - decayed)
     else:
-        rate = 20 * activity[sim.syn_pre_idx]
+        rate = 20 * source_activity
         target_u = (base_u / tau_fac + base_u * rate) / (1 / tau_fac + base_u * rate)
         facilitation = rush_larsen(
-            old.facilitation, target_u, 1 / (1 / tau_fac + base_u * rate), dt
+            old_facilitation, target_u, 1 / (1 / tau_fac + base_u * rate), dt
         )
         resource_tau = 1 / (1 / tau_rec + facilitation * rate)
-        resources = rush_larsen(old.resources, resource_tau / tau_rec, resource_tau, dt)
-        release = facilitation * resources * activity[sim.syn_pre_idx]
+        resources = rush_larsen(old_resources, resource_tau / tau_rec, resource_tau, dt)
+        release = facilitation * resources * source_activity
         receptors = (
             jnp.stack(
                 [
                     binding_step(
-                        old.receptors[:, i],
+                        old_receptors[:, i],
                         release,
                         0.2,
                         r.time_constant(sim.resolution.temperature_C),
@@ -267,8 +265,22 @@ def _synapse_state(sim, old, activity, spikes, event_time, event):
                 axis=1,
             )
             if sim.receptor_records
-            else old.receptors
+            else old_receptors
         )
+    return facilitation, resources, receptors
+
+
+def _synapse_state(sim, old, activity, spikes, event_time, event):
+    """Presynaptic STP and receptor updates for every edge."""
+    if event and sim.resolution.release_mode == "spiking":
+        return event_synapses(sim, old, spikes, event_time)
+    facilitation, resources, receptors = synaptic_update(
+        sim,
+        (old.facilitation, old.resources, old.receptors),
+        sim.syn_params,
+        spikes[sim.syn_pre_idx],
+        activity[sim.syn_pre_idx],
+    )
     return (
         receptors,
         resources,
@@ -437,23 +449,36 @@ def _surrogate_predictions(sim, old, inputs):
     return predicted_state, active, fallback
 
 
-def _front(sim, old, event):
-    """Shared first half of a step: spike events and synapse updates."""
+def _front(sim, old, event, synapses=None):
+    """Shared first half of a step: spike events and synapse updates.
+
+    With `synapses` (distributed.distributed_synapses), the update and the
+    accumulation come from the callable; the cached event conductances stay.
+    """
     v = old.voltage
     # Graded release is a voltage-dependent rate, not a fixed synaptic sign.
     activity = jax.nn.sigmoid((v[:, 0] + 35) / 5)
     spike_above = v[:, 0] >= sim.resolution.spike_threshold_mV
     spikes = spike_above & ~old.spike_above
     event_time = old.event_time + sim.resolution.dt_s
-    synapses = _synapse_state(sim, old, activity, spikes, event_time, event)
-    return activity, spike_above, event_time, synapses
+    if synapses is not None:
+        receptors, resources, facilitation, syn_by, syn_reversal = synapses(
+            sim, old, spikes, activity
+        )
+        result = (receptors, resources, facilitation, old.last_release_time)
+        result += (old.synaptic_conductance, old.synaptic_reversal_current)
+        return activity, spike_above, event_time, result, (syn_by, syn_reversal)
+    state = _synapse_state(sim, old, activity, spikes, event_time, event)
+    return activity, spike_above, event_time, state, None
 
 
-def _hybrid_step(sim, old, current, event=False):
+def _hybrid_step(sim, old, current, event=False, synapses=None):
     """Reference: full kinetics always run; surrogate output replaces the result."""
     dt, n = sim.resolution.dt_s, sim.n_neurons
     v = old.voltage
-    activity, spike_above, event_time, synapses = _front(sim, old, event)
+    activity, spike_above, event_time, synapses, accumulated = _front(
+        sim, old, event, synapses
+    )
     receptors, resources, facilitation, last_release_time, cached_g, cached_b = synapses
     peptide_open, peptide_field, signaling, modulation, drive, inputs = _modulatory(
         sim, old, activity, current
@@ -470,7 +495,9 @@ def _hybrid_step(sim, old, current, event=False):
         else old.gates
     )
     channel_g = _channel_conductance(sim, gates, modulation)
-    if event and sim.resolution.release_mode == "spiking":
+    if accumulated is not None:
+        syn_by, syn_reversal = accumulated
+    elif event and sim.resolution.release_mode == "spiking":
         syn_by, syn_reversal = cached_g, cached_b
     else:
         syn_by, syn_reversal = _synaptic_conductance(sim, receptors)
@@ -526,7 +553,7 @@ def _surrogate_step(sim, old, current):
     plan = sim.fast_plan
     dt, n, c = sim.resolution.dt_s, sim.n_neurons, sim.resolution.n_comp
     v, full, surr = old.voltage, plan.full_idx, plan.surrogate_idx
-    activity, spike_above, event_time, synapses = _front(sim, old, False)
+    activity, spike_above, event_time, synapses, _ = _front(sim, old, False)
     receptors, resources, facilitation, last_release_time = synapses[:4]
     peptide_open, peptide_field, signaling, modulation, drive, inputs = _modulatory(
         sim, old, activity, current
@@ -620,8 +647,16 @@ def _surrogate_step(sim, old, current):
     return new, (voltage, calcium, signaling, residual, iterations, fallback)
 
 
-def step(sim, old, current, event=False):
+def step(sim, old, current, event=False, synapses=None):
+    """One timestep. `synapses` is an opt-in callable replacing the synaptic
+    update and accumulation (distributed.distributed_synapses)."""
     plan = sim.fast_plan
+    if synapses is not None:
+        if event:
+            raise ValueError("distributed synapses do not support event mode")
+        if plan is not None and len(plan.surrogate_idx):
+            raise ValueError("distributed synapses do not support fast surrogates")
+        return _hybrid_step(sim, old, current, synapses=synapses)
     if plan is None or not len(plan.surrogate_idx):
         return _hybrid_step(sim, old, current, event=event)
     if event:

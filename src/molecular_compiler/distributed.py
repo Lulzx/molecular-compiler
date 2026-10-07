@@ -1,7 +1,13 @@
 """C-R3: graph partitions, boundary-only halo exchange and sharded PCG.
 
-This infrastructure is validated on virtual CPU devices. Mouse-scale
-throughput and multi-host deployment require separate hardware evidence.
+Synapses are owned by the device of their postsynaptic neuron: per-synapse
+update and conductance accumulation run per device under shard_map, with
+presynaptic voltage-derived signals (activity, spike) arriving through the
+same boundary halo exchange as the voltage solve.
+
+Verified on virtual CPU devices in one process only (two devices in the
+tests). Multi-host deployment, real interconnect cost and mouse-scale
+throughput require separate hardware evidence.
 """
 
 from dataclasses import dataclass
@@ -29,6 +35,14 @@ class PartitionPlan:
     edge_conductance: object
     halo_neurons: int
     edge_source_index: object
+    # Synapse ownership by postsynaptic device, padded to [partitions, slots].
+    syn_edge_ids: object = None  # global synapse index, -1 padding
+    syn_pre_local: object = None
+    syn_pre_owner: object = None
+    syn_pre_slot: object = None
+    syn_pre_remote: object = None
+    syn_post_local: object = None
+    syn_counts: object = None  # host int array [partitions]
 
     @property
     def partitions(self):
@@ -97,6 +111,34 @@ def partition_graph(sim, devices=None):
         for index, row in enumerate(values):
             for column, value in zip(columns, row):
                 column[owner, index] = value
+    pre, post = np.asarray(sim.syn_pre_idx), np.asarray(sim.syn_post_idx)
+    owned = [[] for _ in range(d)]
+    for edge, j in enumerate(post):
+        owned[int(j) // local_size].append(edge)
+    slots = max(1, max(map(len, owned)))
+    syn = {
+        k: np.zeros((d, slots), dtype=t)
+        for k, t in (
+            ("pre_local", np.int32),
+            ("pre_owner", np.int32),
+            ("pre_slot", np.int32),
+            ("pre_remote", bool),
+            ("post_local", np.int32),
+        )
+    }
+    syn_ids = np.full((d, slots), -1, dtype=np.int32)
+    for owner, edges in enumerate(owned):
+        for k, edge in enumerate(edges):
+            i, j = int(pre[edge]), int(post[edge])
+            source = i // local_size
+            syn_ids[owner, k] = edge
+            syn["pre_local"][owner, k] = i % local_size
+            syn["pre_owner"][owner, k] = source
+            syn["pre_remote"][owner, k] = source != owner
+            syn["pre_slot"][owner, k] = (
+                sends[source][owner].index(i % local_size) if source != owner else 0
+            )
+            syn["post_local"][owner, k] = j % local_size
     mesh = Mesh(np.array(devices), ("device",))
 
     def place(array):
@@ -113,6 +155,12 @@ def partition_graph(sim, devices=None):
         *[place(column) for column in columns[:-1]],
         sum(len(v) for row in sends for v in row),
         place(columns[-1]),
+        place(syn_ids),
+        *[
+            place(syn[k])
+            for k in ("pre_local", "pre_owner", "pre_slot", "pre_remote", "post_local")
+        ],
+        np.array([len(v) for v in owned]),
     )
 
 
@@ -260,6 +308,133 @@ def distributed_voltage_solve(sim, plan, diagonal, rhs, old_voltage):
         jnp.linalg.norm(rhs), 1e-12
     )
     return voltage.reshape(size, c)[: plan.n_neurons], residual, iterations
+
+
+def synaptic_state_bytes(sim, plan):
+    """Per-device bytes of owned per-synapse state and parameters (memory balance).
+
+    Counts the state a device would hold under this plan: receptors, resources,
+    facilitation, last-release time, plus every per-synapse parameter array.
+    """
+    e = len(sim.syn_pre_idx)
+    dtype = sim.neuron_params["capacitance"].dtype
+    per_edge = ((len(sim.receptor_records) + 3) * dtype.itemsize if e else 0) + sum(
+        a.nbytes // e
+        for a in sim.syn_params.values()
+        if e and hasattr(a, "shape") and a.ndim and a.shape[0] == e
+    )
+    return [int(c) * per_edge for c in plan.syn_counts]
+
+
+def distributed_synapses(sim, plan, old, spikes, activity):
+    """Per-device synaptic update and accumulation; pass as `step(synapses=...)`.
+
+    Returns (receptors, resources, facilitation, syn_by_receptor,
+    syn_reversal_by_receptor) matching the single-device step. Global state
+    arrays are gathered into the owner layout and scattered back each call;
+    a persistent sharded state layout is not implemented. Verified on virtual
+    CPU devices only.
+    """
+    d, local, c = plan.partitions, plan.local_size, sim.resolution.n_comp
+    n, e = plan.n_neurons, len(sim.syn_pre_idx)
+    ids = plan.syn_edge_ids
+    valid, safe = ids >= 0, jnp.maximum(ids, 0)
+    pad = d * local - n
+    features = jnp.stack([activity, spikes.astype(activity.dtype)], axis=1)
+    features = jnp.pad(features, ((0, pad), (0, 0))).reshape(d, local, 2)
+    p = sim.syn_params
+    gathered = (
+        old.facilitation[safe],
+        old.resources[safe],
+        old.receptors[safe],
+        p["tau_rec"][safe],
+        p["tau_fac"][safe],
+        p["U"][safe],
+        p["density"][safe],
+        p["gate"][safe],
+        p["compartment"][safe],
+        p["reversal"][safe],
+    )
+    structure = (
+        plan.send_indices,
+        plan.send_mask,
+        plan.syn_pre_local,
+        plan.syn_pre_owner,
+        plan.syn_pre_slot,
+        plan.syn_pre_remote,
+        plan.syn_post_local,
+        valid,
+    )
+    from .simulation import synaptic_update
+
+    @partial(
+        jax.shard_map,
+        mesh=plan.mesh,
+        in_specs=tuple(P("device") for _ in range(1 + len(structure) + len(gathered))),
+        out_specs=P("device"),
+        check_vma=False,
+    )
+    def local_synapses(feat, sends, masks, *rest):
+        pre_local, pre_owner, pre_slot, pre_remote, post_local, ok = [
+            v.reshape(v.shape[1:]) for v in rest[:6]
+        ]
+        fac, res, rec, tau_rec, tau_fac, base_u, density, gate, comp, reversal = [
+            v.reshape(v.shape[1:]) for v in rest[6:]
+        ]
+        f = feat.reshape(local, 2)
+        packed = f[sends.reshape(d, -1)] * masks.reshape(d, -1, 1)
+        halo = jax.lax.all_to_all(packed, "device", split_axis=0, concat_axis=0)
+        source = jnp.where(pre_remote[:, None], halo[pre_owner, pre_slot], f[pre_local])
+        fac, res, rec = synaptic_update(
+            sim,
+            (fac, res, rec),
+            {"tau_rec": tau_rec, "tau_fac": tau_fac, "U": base_u},
+            source[:, 1] > 0.5,
+            source[:, 0],
+        )
+        g = density * p["gbar"] * rec * gate[:, None] * ok[:, None]
+        flat = post_local * c + comp
+        total = jax.ops.segment_sum(g, flat, num_segments=local * c)
+        rev = jax.ops.segment_sum(g * reversal, flat, num_segments=local * c)
+        r = rec.shape[1]
+        return (
+            fac[None],
+            res[None],
+            rec[None],
+            total.reshape(1, local, c, r),
+            rev.reshape(1, local, c, r),
+        )
+
+    fac, res, rec, total, rev = local_synapses(
+        features, *structure[:2], *structure[2:], *gathered
+    )
+    target = jnp.where(valid, ids, e).reshape(-1)
+
+    def scatter(base, new):
+        return base.at[target].set(new.reshape((-1,) + new.shape[2:]), mode="drop")
+
+    r = len(sim.receptor_records)
+    return (
+        scatter(old.receptors, rec),
+        scatter(old.resources, res),
+        scatter(old.facilitation, fac),
+        total.reshape(d * local, c, r)[:n],
+        rev.reshape(d * local, c, r)[:n],
+    )
+
+
+def distributed_step(sim, plan, old, current):
+    """Full step with partitioned synapses and the distributed voltage solve."""
+    from dataclasses import replace
+
+    from .simulation import step
+
+    return step(
+        replace(sim, partition_plan=plan),
+        old,
+        current,
+        synapses=lambda s, o, sp, act: distributed_synapses(s, plan, o, sp, act),
+    )
 
 
 def with_partitions(sim, devices=None):
