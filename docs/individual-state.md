@@ -137,9 +137,10 @@ simulator on canonical neuron names present in every animal.
   population-fitted per-neuron current found by damped diagonal-Jacobian
   relaxation on mean recorded dF/F0; L2 maps head angle to SMDD/SMDV and its
   absolute value to DVA (illustrative, not anatomical); L3 uses the reduced
-  body's illustrative territories; L4 is `unavailable` because the simulator
-  has no modulator-target input (a stand-in linear map to tonic current can be
-  supplied); L5 is `unavailable` unless a body factory is configured. No
+  body's illustrative territories; L4 feeds the recorded pumping into the
+  modulator concentrations c(t) through a supplied map (`l4["gain"]`, no
+  default, so L4 is `unavailable` until one is given); L5 is `unavailable`
+  unless a body factory is configured. No
   per-animal parameter enters the emulation, so L0, L1 and L3 runs are shared
   by all animals.
 - Closed-loop rungs step the simulator in Python, so full-length L3 and L4
