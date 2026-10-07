@@ -52,7 +52,9 @@ Everything that defines the comparison comes from Phase 0 and is unchanged:
 | Fluorescence | F = 0.1 + Hill(Ca) (n = 2), with no indicator kernel. Half-saturation is the initial model's median resting calcium | Calcium units are arbitrary. With a fixed 10⁻³ half-saturation, resting calcium (about 3×10⁻⁶) sat far below it, and no decrease could register. The value is computed from the model alone, never from data. |
 | Chloride | basal [Cl⁻]ᵢ = 5 mM, the lower bound of the policy prior | Unmeasured. At 10 mM, E_Cl ≈ −62 mV lies above the −70 mV rest, so every anion synapse depolarizes; this is the K3 failure. The choice was made after a smoke run showed no negative predictions, before any fold was scored. |
 | Drive gauge | Each simulated column is divided by its simulated self-response (floored at 0.01) and multiplied by the observed autoresponse, with one global gain | Same Section 6.3 gauge as Phase 0. The floor stops near-zero self-responses from producing very large predictions (seen in the smoke run). |
-| Training | AdamW, cosine decay, random batches of stimulated columns, few steps | Compute; see below |
+| Training | AdamW, cosine decay, 60 steps of 4 random stimulated columns (Revision 12; was 30) | Compute; see below |
+| Training adequacy | 8 seeded training columns per fold, evaluated forward-only every 10 updates. Converged if the loss falls less than 2% over the last 20 updates | Revision 12. A fail with any unconverged fold is reported as `fail_undertraining_not_excluded` |
+| Assumption variants | Retrained on the same folds with [Cl⁻]ᵢ = 3 mM (`cl3`), [Cl⁻]ᵢ = 8 mM (`cl8`), and Hill n = 1 (`hill1`) | Revision 12 sensitivity analysis; does not gate acceptance |
 
 ## Status at launch
 
@@ -80,14 +82,34 @@ to B0.
 | `molc traces-ingest` | Converts the OSF trace export into per-event response windows | `data/worm/responses/` |
 | `molc phase1-audit` | Pre-training audit. Reads no targets. Reports the library, family recovery, K3, the resting state, and edges net-inhibitory at rest | `artifacts/phase1/audit.json` |
 | `molc phase1-convergence` | The Section 12.6 test on the untrained model: halve dt, then separately add two compartments | `artifacts/phase1/convergence.json` |
-| `molc phase1-fold --fold F` | Trains one frozen fold. Checkpoints after every step and resumes from a matching checkpoint | `artifacts/phase1/<split>-fold<F>.json`, `.ckpt` |
-| `molc phase1-report` | Refits B0, B1 and B2 on the same folds, pools held-out predictions, and reports metrics, ceilings, paired cluster bootstrap intervals (2,000 draws), the Section 9.3 verdict and the M10 residual analysis | `artifacts/phase1/phase1-report.json` |
+| `molc phase1-convergence --trained F.json` | The same test with a base fold's trained parameters (required before acceptance) | `artifacts/phase1/convergence-trained.json` |
+| `molc phase1-fold --fold F [--variant V]` | Trains one frozen fold, base or variant `cl3`/`cl8`/`hill1`. Checkpoints after every step and resumes from a matching checkpoint. Records the monitor loss and the training-convergence verdict | `artifacts/phase1/<split>[-V]-fold<F>.json`, `.ckpt` |
+| `molc phase1-report` | Refits B0, B1 and B2 on the same folds and pools held-out predictions. Reports metrics, ceilings, paired cluster bootstrap intervals (2,000 draws), the Section 9.3 verdict and its interpretation under the training-adequacy rule, gauge-invariant metrics and the M10 residual analysis. Completed variants appear under `sensitivity` | `artifacts/phase1/phase1-report.json` |
 | `molc heldout-animals` | Exploratory (`pre_registered: false`). Phase 0 linear-response models fit on training animals and scored on held-out animals | `artifacts/phase1/held-out-animals.json` |
 
-Run all five `leave_class_out` folds (for example
-`molc phase1-fold --split leave_class_out --fold 0 --steps 30 --batch 4`),
-then `molc phase1-report`. An interrupted fold resumes on rerun. A checkpoint
-written with different steps, batch, seed or learning rate is refused.
+`scripts/phase1-queue.sh` runs everything in order:
+1. it waits for any running `molc individual-state`;
+2. it trains the five base `leave_class_out` folds three at a time;
+3. it runs the trained-model convergence test and writes the report;
+4. it trains the 15 variant folds and rewrites the report.
+
+Logs go to `artifacts/phase1/logs/`. Rerunning the script resumes: an
+interrupted fold continues from its checkpoint, and a finished fold is
+retrained from its final checkpoint without new updates. A checkpoint written
+with different steps, batch, seed, learning rate or monitor columns is
+refused.
+
+### Gauge-invariant metrics
+
+The drive gauge scales each simulated column by the measured autoresponse.
+Three metrics are unchanged by any positive per-column scale:
+- detection AUROC within each stimulated column, averaged over columns;
+- amplitude correlation within each column, averaged over columns;
+- sign accuracy.
+
+The report gives all three for the compiler and B0–B2, with paired cluster
+bootstrap. A molecular advantage that appears only in the pooled metrics
+depends on the gauge.
 
 ### Residual analysis
 
@@ -157,11 +179,15 @@ values are in `data-register.json`.
     while leaving the metrics nearly unchanged.
   - Repeat the test on a trained fold before any acceptance claim.
 
-## Run state (2026-10-06)
+## Run state (2026-10-07)
 
 - No Phase 1 fold has completed. The first launch was discarded because of
   the chloride bug above.
-- Folds should be relaunched with the current code. They now checkpoint after
-  every step, so a pause or kill loses at most one step.
-- Remaining: about 5 hours of compute for the five `leave_class_out` folds,
-  then `molc phase1-report`. `leave_neuron_out` folds are not scheduled.
+- Revision 12 (training adequacy, variants, gauge-invariant metrics) was
+  fixed before any fold was scored.
+- `scripts/phase1-queue.sh` was launched to start once the Track I0 run
+  finishes.
+- Estimated wall time with three folds in parallel and about 300 s per step:
+  - base folds: about 11 h (two waves of 60 steps);
+  - variants: about 28 h more.
+- `leave_neuron_out` folds are not scheduled.

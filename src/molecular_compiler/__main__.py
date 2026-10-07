@@ -70,8 +70,11 @@ def main():
     fold.add_argument("--output", default="artifacts/phase1")
     fold.add_argument("--split", default="leave_class_out")
     fold.add_argument("--fold", type=int, required=True)
-    fold.add_argument("--steps", type=int, default=40)
+    fold.add_argument("--steps", type=int, default=60)
     fold.add_argument("--batch", type=int, default=4)
+    fold.add_argument(
+        "--variant", default="base", choices=["base", "cl3", "cl8", "hill1"]
+    )
     check = sub.add_parser("phase1-audit", help="pre-training audit of the model")
     check.add_argument("--project", default="data/worm")
     check.add_argument("--output", default="artifacts/phase1")
@@ -90,6 +93,9 @@ def main():
     converge.add_argument("--project", default="data/worm")
     converge.add_argument("--output", default="artifacts/phase1")
     converge.add_argument("--columns", type=int, default=24)
+    converge.add_argument(
+        "--trained", default=None, help="base-variant fold result to test"
+    )
     phase1 = sub.add_parser("phase1-report", help="pool Phase 1 folds vs baselines")
     phase1.add_argument("--project", default="data/worm")
     phase1.add_argument("--registration", default="configs/phase0-stage-a.json")
@@ -156,8 +162,18 @@ def main():
             args.output,
             args.steps,
             args.batch,
+            args.variant,
         )
-        result = {k: report[k] for k in ("split", "fold", "wall_seconds")}
+        result = {
+            k: report[k]
+            for k in (
+                "split",
+                "fold",
+                "variant",
+                "wall_seconds",
+                "training_convergence",
+            )
+        }
     elif args.command == "phase1-audit":
         from .phase1_worm import audit
 
@@ -192,7 +208,9 @@ def main():
     elif args.command == "phase1-convergence":
         from .phase1_worm import convergence_test
 
-        report = convergence_test(args.project, args.output, columns=args.columns)
+        report = convergence_test(
+            args.project, args.output, columns=args.columns, trained=args.trained
+        )
         result = {
             name: {"passed": report[name]["passed"], "checks": report[name]["checks"]}
             for name in ("half_dt", "plus_two_compartments")

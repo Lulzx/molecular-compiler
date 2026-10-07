@@ -24,6 +24,11 @@ Declared approximations (Section 10.3):
   with one global gain; simulated self-responses are floored at 0.01;
 - stimulation is a 0.5 s, 200 pA current step;
 - residuals are off.
+
+Revision 12 adds a training-convergence monitor (a fixed set of training
+columns evaluated forward-only every MONITOR_EVERY steps), assumption
+variants retrained on the same folds (VARIANTS: [Cl-]i = 3 and 8 mM, Hill
+n = 1), and gauge-invariant metrics in the report.
 """
 
 import json
@@ -60,9 +65,21 @@ SEGMENT_STEPS = 50
 GAP_UNIT_NS = 0.05
 D_Z = 2
 TRAINABLE = ("density", "context", "gap", "bias")
+HILL = 2.0
+MONITOR_COLUMNS = 8
+MONITOR_EVERY = 10
+PLATEAU_STEPS = 20
+PLATEAU_TOLERANCE = 0.02
+# Revision 12 assumption variants; every one stays below the 9 mM K3 bound.
+VARIANTS = {
+    "base": {},
+    "cl3": {"chloride_mM": 3.0},
+    "cl8": {"chloride_mM": 8.0},
+    "hill1": {"hill": 1.0},
+}
 
 
-def policy():
+def policy(chloride_mM=CHLORIDE_MM):
     from .compiler import ResolutionPolicy
     from .worm_kinetics import PASSIVE
 
@@ -73,7 +90,7 @@ def policy():
         solver="pcg",
         synapse_unit_nS=SYNAPSE_UNIT_NS,
         gap_unit_nS=GAP_UNIT_NS,
-        intracellular_mM=(15.0, 140.0, CHLORIDE_MM, 0.0001),
+        intracellular_mM=(15.0, 140.0, chloride_mM, 0.0001),
         **PASSIVE,
     )
 
@@ -99,7 +116,7 @@ def frozen_basis(graph, seed=SEED):
     return frozen
 
 
-def setup(project, budget):
+def setup(project, budget, chloride_mM=CHLORIDE_MM):
     from .provenance import DataRegister, inherit
     from .rules import RuleNetwork
     from .worm_kinetics import build_worm_library
@@ -115,7 +132,7 @@ def setup(project, budget):
         graph,
         manifest["gene_names"],
         inherit([curation], "phase1"),
-        basal_chloride_mM=CHLORIDE_MM,
+        basal_chloride_mM=chloride_mM,
     )
     frozen = frozen_basis(graph)
     rules = RuleNetwork.initialize_partial(
@@ -124,7 +141,7 @@ def setup(project, budget):
     return graph, manifest, atlas, library, rules
 
 
-def make_simulator(graph, rules, library, pol, half_saturation=None):
+def make_simulator(graph, rules, library, pol, half_saturation=None, hill=HILL):
     """Return f(params, nuisance, columns) -> predicted dF/F0 [N, len(columns)]."""
     from .compiler import compile
     from .simulation import _sequential, initial_state
@@ -142,8 +159,8 @@ def make_simulator(graph, rules, library, pol, half_saturation=None):
         half_saturation = float(np.median(np.maximum(np.asarray(initial.calcium), 0)))
 
     def fluorescence(calcium):
-        power = jnp.maximum(calcium, 0) ** 2
-        return F_BASAL + power / (half_saturation**2 + power)
+        power = jnp.maximum(calcium, 0) ** hill
+        return F_BASAL + power / (half_saturation**hill + power)
 
     total_steps = pulse_steps + post_steps
     if total_steps % SEGMENT_STEPS:
@@ -221,12 +238,16 @@ def train_fold(
     seed=SEED,
     lr=0.05,
     checkpoint=None,
+    monitor=None,
 ):
     """AdamW on rule parameters and the global gain; random column batches.
 
     With `checkpoint`, parameters, optimizer state, the batch RNG and the
     history are saved after every step, and a matching checkpoint is resumed.
     A resumed run draws the same batches as an uninterrupted one.
+
+    With `monitor` (training columns), the full loss on those columns is
+    evaluated forward-only after every MONITOR_EVERY updates and at the end.
     """
     trainable = {"rules": params, "nuisance": {"log_gain": jnp.array(0.0)}}
     columns = np.flatnonzero(weights.sum(axis=0) > 0)
@@ -249,9 +270,26 @@ def train_fold(
         changes, s = optimizer.update(grad, s, p)
         return optax.apply_updates(p, changes), s, value, optax.tree.norm(grad)
 
+    monitor_loss = None
+    if monitor is not None:
+        monitor_columns = jnp.asarray(monitor)
+        monitor_loss = jax.jit(lambda p: loss(p, monitor_columns))
+    monitored = []
+
+    def observe(after):
+        if monitor_loss is not None and not any(
+            m["after_updates"] == after for m in monitored
+        ):
+            monitored.append(
+                {"after_updates": after, "loss": float(monitor_loss(trainable))}
+            )
+            print(json.dumps({"monitor": monitored[-1]}), flush=True)
+
     rng = np.random.default_rng(seed)
     history = []
     config = {"steps": steps, "batch": batch, "seed": seed, "lr": lr}
+    if monitor is not None:
+        config["monitor"] = [int(c) for c in monitor]
     if checkpoint is not None:
         payload = _load_checkpoint(checkpoint, config)
         if payload is not None:
@@ -259,8 +297,11 @@ def train_fold(
             state = jax.tree.map(jnp.asarray, payload["state"])
             rng.bit_generator.state = payload["rng"]
             history = payload["history"]
+            monitored = payload.get("monitor", [])
             print(json.dumps({"resumed_at_step": len(history)}), flush=True)
     for iteration in range(len(history), steps):
+        if iteration % MONITOR_EVERY == 0:
+            observe(iteration)
         chosen = jnp.asarray(rng.choice(columns, size=batch, replace=False))
         start = time.perf_counter()
         trainable, state, value, norm = update(trainable, state, chosen)
@@ -284,9 +325,49 @@ def train_fold(
                     "state": state,
                     "rng": rng.bit_generator.state,
                     "history": history,
+                    "monitor": monitored,
                 },
             )
-    return trainable, history
+    observe(steps)
+    if monitor is None:
+        return trainable, history
+    return trainable, history, monitored
+
+
+def training_convergence(monitored, steps):
+    """Revision 12 plateau rule on the monitor loss.
+
+    Converged when the monitor loss fell by less than PLATEAU_TOLERANCE
+    (relative) over the last PLATEAU_STEPS updates.
+    """
+    loss = {m["after_updates"]: m["loss"] for m in monitored}
+    start, end = steps - PLATEAU_STEPS, steps
+    if start not in loss or end not in loss or 0 not in loss:
+        return {"converged": None, "reason": "monitor points missing"}
+    late = (loss[start] - loss[end]) / max(loss[start], 1e-30)
+    return {
+        "converged": bool(late < PLATEAU_TOLERANCE),
+        "initial_loss": loss[0],
+        "final_loss": loss[end],
+        "total_relative_decrease": (loss[0] - loss[end]) / max(loss[0], 1e-30),
+        "late_relative_decrease": late,
+        "rule": f"monitor loss falls < {PLATEAU_TOLERANCE:.0%} over the last "
+        f"{PLATEAU_STEPS} updates",
+    }
+
+
+def monitor_columns(weights, seed=SEED):
+    columns = np.flatnonzero(weights.sum(axis=0) > 0)
+    rng = np.random.default_rng(seed + 12)
+    return np.sort(
+        rng.choice(columns, min(MONITOR_COLUMNS, len(columns)), replace=False)
+    )
+
+
+def fold_name(split, fold, variant="base"):
+    return (
+        f"{split}-fold{fold}" if variant == "base" else f"{split}-{variant}-fold{fold}"
+    )
 
 
 def predict_all(predict, trainable, columns, auto, chunk=8):
@@ -299,8 +380,15 @@ def predict_all(predict, trainable, columns, auto, chunk=8):
     return np.concatenate(blocks, axis=1)
 
 
-def run_fold(project, registration, split, fold, output, steps, batch):
+def run_fold(project, registration, split, fold, output, steps, batch, variant="base"):
     """Train on one frozen fold and write held-out predictions (restricted)."""
+    if steps % MONITOR_EVERY or steps < PLATEAU_STEPS:
+        raise ValueError(
+            f"steps must be a multiple of {MONITOR_EVERY} and >= {PLATEAU_STEPS}"
+        )
+    options = VARIANTS[variant]
+    chloride = options.get("chloride_mM", CHLORIDE_MM)
+    hill = options.get("hill", HILL)
     reg = registration["registration"]
     budget = 13
     stage_b = Path("configs/phase0-stage-b.json")
@@ -308,10 +396,10 @@ def run_fold(project, registration, split, fold, output, steps, batch):
         budget = json.loads(stage_b.read_text())["registration"][
             "absolute_parameter_budget"
         ]
-    graph, manifest, atlas, library, rules = setup(project, budget)
+    graph, manifest, atlas, library, rules = setup(project, budget, chloride)
     with jax.enable_x64(True):
-        pol = policy()
-        predict, _ = make_simulator(graph, rules, library, pol)
+        pol = policy(chloride)
+        predict, _ = make_simulator(graph, rules, library, pol, hill=hill)
         wt = atlas["wt"]
         observed = observed_mask(wt)
         auto, _ = autoresponse(wt["dff"])
@@ -321,7 +409,9 @@ def run_fold(project, registration, split, fold, output, steps, batch):
                 continue
             start = time.perf_counter()
             Path(output).mkdir(parents=True, exist_ok=True)
-            trainable, history = train_fold(
+            name = fold_name(split, fold, variant)
+            monitor = monitor_columns(weights_all * train)
+            trainable, history, monitored = train_fold(
                 predict,
                 rules.params,
                 wt["dff"],
@@ -329,7 +419,8 @@ def run_fold(project, registration, split, fold, output, steps, batch):
                 auto,
                 steps,
                 batch,
-                checkpoint=Path(output) / f"{split}-fold{fold}.ckpt",
+                checkpoint=Path(output) / f"{name}.ckpt",
+                monitor=monitor,
             )
             columns = np.flatnonzero(test.any(axis=0))
             prediction = predict_all(predict, trainable, columns, jnp.asarray(auto))
@@ -339,6 +430,7 @@ def run_fold(project, registration, split, fold, output, steps, batch):
             result = {
                 "split": split,
                 "fold": fold,
+                "variant": variant,
                 "registration_hash": registration["processing_hash"],
                 "parameter_budget": budget,
                 "trainable_parameters": int(
@@ -348,6 +440,9 @@ def run_fold(project, registration, split, fold, output, steps, batch):
                 "steps": steps,
                 "batch": batch,
                 "history": history,
+                "monitor_columns": monitor.tolist(),
+                "monitor": monitored,
+                "training_convergence": training_convergence(monitored, steps),
                 "params": jax.tree.map(lambda x: np.asarray(x).tolist(), trainable),
                 "test_pairs": np.stack(index, axis=1).tolist(),
                 "test_prediction": full[index].tolist(),
@@ -357,7 +452,8 @@ def run_fold(project, registration, split, fold, output, steps, batch):
                     "n_comp": 1,
                     "drive_pA": DRIVE_PA,
                     "synapse_unit_nS": SYNAPSE_UNIT_NS,
-                    "chloride_mM": CHLORIDE_MM,
+                    "chloride_mM": chloride,
+                    "hill": hill,
                     "half_saturation": predict.half_saturation,
                     "self_floor": SELF_FLOOR,
                     "gap_unit_nS": GAP_UNIT_NS,
@@ -367,13 +463,104 @@ def run_fold(project, registration, split, fold, output, steps, batch):
             }
             out = Path(output)
             out.mkdir(parents=True, exist_ok=True)
-            _dump(out / f"{split}-fold{fold}.json", result)
+            _dump(out / f"{name}.json", result)
             return result
     raise ValueError(f"fold {fold} not in 0..{FOLDS - 1}")
 
 
+def within_column(predicted, observed, labels, pairs):
+    """Gauge-invariant metrics: unchanged by any positive per-column scale.
+
+    Detection is the mean AUROC of |prediction| within each stimulated column
+    that has both labels; amplitude is the mean within-column Pearson
+    correlation over columns with at least three pairs. Sign accuracy is
+    already invariant and is reported by `_metrics`.
+    """
+    from .evaluation import auroc
+
+    detection, amplitude = [], []
+    for column in np.unique(pairs[:, 1]):
+        rows = pairs[:, 1] == column
+        if 0 < labels[rows].sum() < rows.sum():
+            detection.append(auroc(labels[rows], np.abs(predicted[rows])))
+        if (
+            rows.sum() >= 3
+            and np.std(predicted[rows]) > 0
+            and np.std(observed[rows]) > 0
+        ):
+            amplitude.append(np.corrcoef(predicted[rows], observed[rows])[0, 1])
+    return {
+        "detection_within_column": float(np.mean(detection)) if detection else None,
+        "amplitude_within_column": float(np.mean(amplitude)) if amplitude else None,
+    }
+
+
+def gauge_invariant(predictions, observed, labels, clusters, pairs, reference):
+    from .phase0_worm import cluster_bootstrap
+
+    table = {
+        name: within_column(values, observed, labels, pairs)
+        for name, values in predictions.items()
+    }
+    comparisons = {}
+    for name in ("B0", "B1", "B2"):
+        if name not in predictions:
+            continue
+        entry = {}
+        for metric in ("detection_within_column", "amplitude_within_column"):
+
+            def stat(index, metric=metric, name=name):
+                a = within_column(
+                    predictions[reference][index],
+                    observed[index],
+                    labels[index],
+                    pairs[index],
+                )[metric]
+                b = within_column(
+                    predictions[name][index],
+                    observed[index],
+                    labels[index],
+                    pairs[index],
+                )[metric]
+                return None if a is None or b is None else a - b
+
+            entry[metric] = cluster_bootstrap(None, clusters, stat)
+        comparisons[f"{reference}-{name}"] = entry
+    return {"metrics": table, "comparisons": comparisons}
+
+
+def _fold_predictions(files, pairs):
+    lookup, convergence = {}, []
+    for path in files:
+        fold = json.loads(path.read_text())
+        for (i, j), v in zip(fold["test_pairs"], fold["test_prediction"]):
+            lookup[(i, j)] = v
+        convergence.append(
+            {
+                "fold": fold["fold"],
+                **fold.get("training_convergence", {"converged": None}),
+            }
+        )
+    values = np.array([lookup[tuple(p)] for p in pairs.tolist()])
+    return values, convergence
+
+
+def interpret(accepted, convergence):
+    """Revision 12: a fail with an unconverged fold cannot blame the rules."""
+    converged = [c.get("converged") for c in convergence]
+    if accepted:
+        return "pass"
+    if all(c is True for c in converged):
+        return "fail_trained_to_plateau"
+    return "fail_undertraining_not_excluded"
+
+
 def report(project, registration, output, steps=1500):
-    """Pool fold predictions, refit Phase 0 baselines and summarize."""
+    """Pool fold predictions, refit Phase 0 baselines and summarize.
+
+    The base variant decides Section 9.3. Variants (Revision 12) are scored
+    against the same refit baselines and reported as sensitivity analyses.
+    """
     from .phase0_worm import (
         amplitude_ceiling,
         atlas_inputs,
@@ -382,33 +569,28 @@ def report(project, registration, output, steps=1500):
         standard_models,
         summarize,
     )
-    from .worm_public import load_worm_project
+    from .worm_public import load_atlas, load_worm_project
 
     reg = registration["registration"]
     graph, manifest = load_worm_project(project)
     n = len(manifest["neuron_names"])
-    from .worm_public import load_atlas
-
     atlas = align_atlas(load_atlas(Path(project) / "signal_propagation.npz"), n)
     wt = atlas["wt"]
     inputs = atlas_inputs(graph, manifest)
     out = Path(output)
     result = {"registration_hash": registration["processing_hash"], "splits": {}}
     for split in ("leave_class_out", "leave_neuron_out"):
-        files = [out / f"{split}-fold{f}.json" for f in range(FOLDS)]
-        if not all(p.exists() for p in files):
+        files = {
+            v: [out / f"{fold_name(split, f, v)}.json" for f in range(FOLDS)]
+            for v in VARIANTS
+        }
+        if not all(p.exists() for p in files["base"]):
             result["splits"][split] = {"status": "not_run"}
             continue
         models = [m for m in standard_models() if m.name in ("B0", "B1", "B2")]
-        predictions, values, labels, clusters, pairs, _ = cross_validate(
+        baselines, values, labels, clusters, pairs, _ = cross_validate(
             models, inputs, wt, reg, manifest, split, steps
         )
-        lookup = {}
-        for path in files:
-            fold = json.loads(path.read_text())
-            for (i, j), v in zip(fold["test_pairs"], fold["test_prediction"]):
-                lookup[(i, j)] = v
-        predictions["compiler"] = np.array([lookup[tuple(p)] for p in pairs.tolist()])
         observed = observed_mask(wt)
         test = np.zeros_like(observed)
         test[tuple(pairs.T)] = True
@@ -416,14 +598,37 @@ def report(project, registration, output, steps=1500):
             "amplitude": amplitude_ceiling(wt["trials"], test)[0],
             "sign": sign_ceiling(wt["trials"], test & (wt["q"] < 0.05))[0],
         }
-        summary = summarize(predictions, values, labels, clusters, ceilings)
-        summary["ceilings"] = ceilings
-        summary["acceptance"] = acceptance(summary)
         auto, _ = autoresponse(wt["dff"])
-        summary["residual_analysis"] = residual_report(
-            inputs, auto, pairs, values, predictions["compiler"]
-        )
-        result["splits"][split] = summary
+        entry = {}
+        for variant, paths in files.items():
+            if not all(p.exists() for p in paths):
+                entry[variant] = {"status": "not_run"}
+                continue
+            compiler, convergence = _fold_predictions(paths, pairs)
+            predictions = {**baselines, "compiler": compiler}
+            summary = summarize(predictions, values, labels, clusters, ceilings)
+            summary["ceilings"] = ceilings
+            summary["acceptance"] = acceptance(summary)
+            summary["training_convergence"] = convergence
+            summary["interpretation"] = interpret(
+                summary["acceptance"]["passed"], convergence
+            )
+            summary["gauge_invariant"] = gauge_invariant(
+                predictions, values, labels, clusters, pairs, "compiler"
+            )
+            summary["residual_analysis"] = residual_report(
+                inputs, auto, pairs, values, compiler
+            )
+            summary["assumptions"] = {
+                "chloride_mM": VARIANTS[variant].get("chloride_mM", CHLORIDE_MM),
+                "hill": VARIANTS[variant].get("hill", HILL),
+            }
+            entry[variant] = summary
+        base = entry["base"]
+        result["splits"][split] = {
+            **base,
+            "sensitivity": {k: v for k, v in entry.items() if k != "base"},
+        }
     result["data_tier"] = "restricted"
     _dump(out / "phase1-report.json", result)
     return result
@@ -684,7 +889,19 @@ def held_out_animals(project, output, steps=1500, folds=FOLDS, seed=SEED):
     return result
 
 
-def convergence_test(project, output, columns=24, seed=SEED, tolerance=0.02):
+def load_trained(path):
+    """Trained parameters and half-saturation from a fold result file."""
+    fold = json.loads(Path(path).read_text())
+    params = {
+        "rules": {k: jnp.asarray(v) for k, v in fold["params"]["rules"].items()},
+        "nuisance": {k: jnp.asarray(v) for k, v in fold["params"]["nuisance"].items()},
+    }
+    return params, fold["policy"]["half_saturation"], fold
+
+
+def convergence_test(
+    project, output, columns=24, seed=SEED, tolerance=0.02, trained=None
+):
     """Section 12.6 on the Phase 1 model: halve dt; separately add two compartments.
 
     The initial (untrained) model is compared at the chosen resolution and at
@@ -693,6 +910,10 @@ def convergence_test(project, output, columns=24, seed=SEED, tolerance=0.02):
     changes by less than `tolerance` x its noise ceiling (detection has no
     ceiling and uses `tolerance` in raw AUROC, declared). The half-saturation
     is fixed from the base resolution so only the numerics change.
+
+    With `trained` (a fold result file), the trained parameters and that
+    fold's half-saturation are used instead, which is the repeat on the
+    trained model that Section 10.3 requires before any acceptance claim.
     """
     from .phase0_worm import _metrics, amplitude_ceiling, sign_ceiling
 
@@ -720,15 +941,18 @@ def convergence_test(project, output, columns=24, seed=SEED, tolerance=0.02):
         "plus_two_compartments": replace(base, n_comp=base.n_comp + 2),
     }
     results, half_saturation = {}, None
+    trainable = {"rules": rules.params, "nuisance": {"log_gain": jnp.array(0.0)}}
+    source = "untrained"
+    if trained is not None:
+        trainable, half_saturation, fold = load_trained(trained)
+        if fold.get("variant", "base") != "base":
+            raise ValueError("the convergence test uses base-variant folds")
+        source = str(trained)
     with jax.enable_x64(True):
         for name, pol in variants.items():
             start = time.perf_counter()
             predict, _ = make_simulator(graph, rules, library, pol, half_saturation)
             half_saturation = predict.half_saturation
-            trainable = {
-                "rules": rules.params,
-                "nuisance": {"log_gain": jnp.array(0.0)},
-            }
             full = np.full(observed.shape, np.nan)
             full[:, chosen] = predict_all(predict, trainable, chosen, jnp.asarray(auto))
             results[name] = {
@@ -760,8 +984,10 @@ def convergence_test(project, output, columns=24, seed=SEED, tolerance=0.02):
             "seconds": results[name]["seconds"],
         }
     report["policy"] = {"dt_s": base.dt_s, "n_comp": base.n_comp}
+    report["parameters"] = source
     report["data_tier"] = "restricted"
     out = Path(output)
     out.mkdir(parents=True, exist_ok=True)
-    _dump(out / "convergence.json", report)
+    name = "convergence.json" if trained is None else "convergence-trained.json"
+    _dump(out / name, report)
     return report

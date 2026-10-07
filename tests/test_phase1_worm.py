@@ -270,3 +270,85 @@ def test_M12_pair_matrix_aggregates_trials_by_responder_and_stimulated():
     np.testing.assert_array_equal(np.sort(trials[0][1]), [1.0, 2.0, 3.0])
     mean, count, _ = pair_matrix(responses, 2, rows=np.array([2, 3]))
     assert mean[1, 0] == 5.0 and mean[0, 1] == 2.0 and count[0, 1] == 1
+
+
+def test_M10_phase1_monitor_resumes_and_plateau_rule(tmp_path, monkeypatch):
+    import molecular_compiler.phase1_worm as p1
+
+    monkeypatch.setattr(p1, "MONITOR_EVERY", 2)
+    monkeypatch.setattr(p1, "PLATEAU_STEPS", 2)
+    n = 6
+    rng = np.random.default_rng(0)
+    target = rng.normal(size=(n, n))
+    weights = (rng.random((n, n)) < 0.7).astype(float)
+
+    def predict(params, nuisance, columns, auto):
+        base = jnp.outer(params["a"], params["b"])[:, columns]
+        return jnp.exp(nuisance["log_gain"]) * base * auto[columns][None, :]
+
+    params = {"a": jnp.ones(n), "b": jnp.linspace(0.5, 1.5, n)}
+    monitor = p1.monitor_columns(weights)
+    args = (predict, params, target, weights, np.ones(n), 6, 2)
+    _, _, full = p1.train_fold(*args, monitor=monitor)
+    assert [m["after_updates"] for m in full] == [0, 2, 4, 6]
+
+    class Stop(Exception):
+        pass
+
+    original = p1._save_checkpoint
+
+    def save_then_stop(path, data):
+        original(path, data)
+        if len(data["history"]) == 3:
+            raise Stop
+
+    path = tmp_path / "fold.ckpt"
+    monkeypatch.setattr(p1, "_save_checkpoint", save_then_stop)
+    with pytest.raises(Stop):
+        p1.train_fold(*args, checkpoint=path, monitor=monitor)
+    monkeypatch.setattr(p1, "_save_checkpoint", original)
+    _, _, resumed = p1.train_fold(*args, checkpoint=path, monitor=monitor)
+    assert [m["loss"] for m in resumed] == pytest.approx([m["loss"] for m in full])
+
+    flat = [
+        {"after_updates": k, "loss": v} for k, v in ((0, 2.0), (4, 1.0), (6, 0.995))
+    ]
+    assert p1.training_convergence(flat, 6)["converged"] is True
+    falling = [
+        {"after_updates": k, "loss": v} for k, v in ((0, 2.0), (4, 1.0), (6, 0.9))
+    ]
+    assert p1.training_convergence(falling, 6)["converged"] is False
+
+
+def test_M12_phase1_fail_with_unconverged_fold_does_not_blame_rules():
+    import molecular_compiler.phase1_worm as p1
+
+    assert p1.interpret(True, [{"converged": False}]) == "pass"
+    assert p1.interpret(False, [{"converged": True}] * 5) == "fail_trained_to_plateau"
+    assert (
+        p1.interpret(False, [{"converged": True}, {"converged": False}])
+        == "fail_undertraining_not_excluded"
+    )
+
+
+def test_M12_within_column_metrics_ignore_per_column_scale():
+    import molecular_compiler.phase1_worm as p1
+
+    rng = np.random.default_rng(1)
+    pairs = np.column_stack([np.tile(np.arange(8), 4), np.repeat(np.arange(4), 8)])
+    observed = rng.normal(size=32)
+    predicted = observed + rng.normal(scale=0.5, size=32)
+    labels = np.abs(observed) > 0.5
+    scaled = predicted * np.array([0.1, 3.0, 7.0, 0.5])[pairs[:, 1]]
+    assert p1.within_column(predicted, observed, labels, pairs) == pytest.approx(
+        p1.within_column(scaled, observed, labels, pairs)
+    )
+
+
+def test_M10_phase1_variants_stay_below_the_K3_chloride_bound():
+    import molecular_compiler.phase1_worm as p1
+
+    assert set(p1.VARIANTS) == {"base", "cl3", "cl8", "hill1"}
+    assert all(v.get("chloride_mM", p1.CHLORIDE_MM) < 9 for v in p1.VARIANTS.values())
+    assert p1.fold_name("leave_class_out", 2) == "leave_class_out-fold2"
+    assert p1.fold_name("leave_class_out", 2, "cl8") == "leave_class_out-cl8-fold2"
