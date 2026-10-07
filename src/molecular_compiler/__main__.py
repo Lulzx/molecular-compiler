@@ -81,6 +81,11 @@ def main():
     animals.add_argument("--project", default="data/worm")
     animals.add_argument("--output", default="artifacts/phase1")
     animals.add_argument("--steps", type=int, default=1500)
+    individual = sub.add_parser(
+        "individual-state", help="Track I Stage I0 per-animal latent (spec 10.4)"
+    )
+    individual.add_argument("--project", default="data/worm")
+    individual.add_argument("--output", default="artifacts/individual")
     converge = sub.add_parser("phase1-convergence", help="Section 12.6 test")
     converge.add_argument("--project", default="data/worm")
     converge.add_argument("--output", default="artifacts/phase1")
@@ -169,6 +174,20 @@ def main():
             "metrics": report["metrics"],
             "ceilings": report["ceilings"],
             "n_pairs": report["n_pairs"],
+        }
+    elif args.command == "individual-state":
+        from .individual import individual_state
+
+        report = individual_state(
+            args.project, args.output, log=lambda m: print(m, flush=True)
+        )
+        result = {
+            "r_star": report["r_star"],
+            "gates": {
+                "I0-1": report["gates"]["I0-1"]["pass"],
+                "I0-2": report["gates"]["I0-2"]["pass"],
+                "I0-3": report["gates"]["I0-3"]["verdict"],
+            },
         }
     elif args.command == "phase1-convergence":
         from .phase1_worm import convergence_test
