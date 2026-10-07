@@ -100,6 +100,22 @@ def main():
     phase1.add_argument("--project", default="data/worm")
     phase1.add_argument("--registration", default="configs/phase0-stage-a.json")
     phase1.add_argument("--output", default="artifacts/phase1")
+    i2 = sub.add_parser(
+        "track-i2", help="Track I Stage I2 minimum virtual body (spec 10.4, M13)"
+    )
+    i2.add_argument("--trained", required=True, help="Phase 1 fold result JSON")
+    i2.add_argument("--variant", choices=["base", "cl3", "cl8", "hill1"])
+    i2.add_argument("--project", default="data/worm")
+    i2.add_argument("--recordings", required=True, help="directory of Atanas files")
+    i2.add_argument("--labels", required=True, help="NeuroPAL label JSON")
+    i2.add_argument("--manifest", help="checksum manifest {file, animal_id, sha256}")
+    i2.add_argument("--output", default="artifacts/track-i/i2-report.json")
+    i2.add_argument("--horizons", nargs="+", default=["60", "300", "full"])
+    i2.add_argument("--rungs", nargs="+", default=["L0", "L1", "L2", "L3", "L4", "L5"])
+    i2.add_argument("--decoder", help="npz decoder and per-animal latents (optional)")
+    i2.add_argument("--window-s", type=float, default=30.0)
+    i2.add_argument("--warmup-s", type=float, default=20.0)
+    i2.add_argument("--dt-grid-s", type=float)
     phase0.add_argument(
         "--ripoll",
         default="data/cache/cect/cect/data/"
@@ -204,6 +220,39 @@ def main():
                 "I0-2": report["gates"]["I0-2"]["pass"],
                 "I0-3": report["gates"]["I0-3"]["verdict"],
             },
+        }
+    elif args.command == "track-i2":
+        from . import minimum_body as mb
+
+        sim, names, fluorescence, meta = mb.build_phase1_simulator(
+            args.trained, args.project, args.variant
+        )
+        decoder = latents = None
+        if args.decoder:
+            decoder, latents = mb.load_decoder(args.decoder)
+        recordings = mb.load_directory(
+            args.recordings, args.labels, args.manifest, canonical=set(names)
+        )
+        report = mb.track_i2(
+            sim,
+            names,
+            recordings,
+            fluorescence,
+            horizons=args.horizons,
+            rungs=args.rungs,
+            decoder=decoder,
+            latents=latents,
+            window_s=args.window_s,
+            warmup_s=args.warmup_s,
+            dt_grid_s=args.dt_grid_s,
+            provenance=meta,
+            log=lambda m: print(m, flush=True),
+        )
+        mb.write_report(report, args.output)
+        result = {
+            "output": args.output,
+            "part_ii": report["part_ii"]["status"],
+            "summary": report["summary"],
         }
     elif args.command == "phase1-convergence":
         from .phase1_worm import convergence_test

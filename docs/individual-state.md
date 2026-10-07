@@ -105,3 +105,44 @@ reported alongside.
 ## Results
 
 Pending: the first run is in progress.
+
+## Stage I2 command (`molc track-i2`)
+
+```bash
+uv run molc track-i2 --trained artifacts/phase1/<fold>.json \
+    --recordings <atanas dir> --labels <neuropal labels.json> \
+    [--manifest <receipt.json>] [--decoder decoder.npz] \
+    [--variant base] [--horizons 60 300 full] [--output artifacts/track-i/i2-report.json]
+```
+
+Implemented in `minimum_body.py`; not yet run on real data. The simulator is
+rebuilt from a trained Phase 1 fold result (`--variant` must match the fold's).
+Recordings are read from `gcamp/trace_array_original` and aligned to the
+simulator on canonical neuron names present in every animal.
+
+- **Part (i)** is `sustain.spontaneous_activity_check` against all recorded
+  animals that cover H, on dF/F0 with F0 the 10th percentile over [0, H].
+- **Part (ii)** is `not_evaluable` unless `--decoder` supplies a decoder and
+  per-animal latents (npz: `weights`, `bias`, `mean`, `neurons`, `animals`,
+  `latents`; the readout acts on per-neuron window means). Stage I0 found no
+  usable latent (spec Revision 13), so a default run reports it as such. It
+  is never counted as a pass or a fail.
+- **Verdicts:** `sustains_this_worm`, `sustains_a_worm`,
+  `sustains_a_worm_identity_not_evaluable`, `fails`. The report gives, per
+  animal and H, the lowest rung that sustains *a* worm (part i) and, when
+  part (ii) is evaluable, the lowest that sustains *this* worm, each with its
+  M13-R4 body-model defects. Every rung up to and beyond the first pass is
+  recorded with its M13-R2 fields (boundary condition, rung, H).
+- **Declared approximations** (also listed in the report): L1 is one
+  population-fitted per-neuron current found by damped diagonal-Jacobian
+  relaxation on mean recorded dF/F0; L2 maps head angle to SMDD/SMDV and its
+  absolute value to DVA (illustrative, not anatomical); L3 uses the reduced
+  body's illustrative territories; L4 is `unavailable` because the simulator
+  has no modulator-target input (a stand-in linear map to tonic current can be
+  supplied); L5 is `unavailable` unless a body factory is configured. No
+  per-animal parameter enters the emulation, so L0, L1 and L3 runs are shared
+  by all animals.
+- Closed-loop rungs step the simulator in Python, so full-length L3 and L4
+  runs at the Phase 1 timestep are slow.
+- Output carries `data_tier: restricted`. Tested only on a tiny synthetic
+  network and synthetic HDF5 (`tests/test_minimum_body.py`).
