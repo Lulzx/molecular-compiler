@@ -114,6 +114,58 @@ def scaling_benchmark(sizes=(8, 32, 128), repeats=10):
     }
 
 
+def surrogate_execution_benchmark(sizes=(128, 256, 512), repeats=5, steps=20):
+    """Steady-state per-step cost: hybrid reference vs fast surrogate execution.
+
+    Every neuron carries a synthetic relaxation surrogate inside its envelope, so the
+    fast path never falls back. Timing is of a jitted scan, divided by `steps`.
+    """
+    from .fixtures import synthetic_surrogates
+    from .surrogates import plan_fast_execution
+
+    if repeats < 1 or steps < 1 or not sizes or any(n < 2 for n in sizes):
+        raise ValueError("benchmark needs positive repeats, steps and sizes >= 2")
+    rows = []
+    for n in sizes:
+        graph, rules, kinetics = synthetic_system(n)
+        base = synthetic_surrogates(compile(graph, rules, kinetics))
+        fast_sim = plan_fast_execution(base)
+        # Nonzero drive so the iterative solve does real work every step.
+        currents = jnp.tile(jnp.linspace(-5.0, 5.0, n), (steps, 1))
+        results, timings = {}, {}
+        for name, sim in (("hybrid", base), ("fast", fast_sim)):
+            run = jax.jit(
+                lambda c, sim=sim: jax.lax.scan(
+                    lambda s, x: step(sim, s, x), initial_state(sim), c
+                )
+            )
+            timings[name] = timed(partial(run, currents), repeats)
+            timings[name]["per_step_s"] = timings[name]["steady_call_s"] / steps
+            results[name] = run(currents)[1][0]
+        rows.append(
+            {
+                "neurons": n,
+                "surrogate_neurons": len(fast_sim.fast_plan.surrogate_idx),
+                "hybrid": timings["hybrid"],
+                "fast": timings["fast"],
+                "speedup": timings["hybrid"]["per_step_s"]
+                / timings["fast"]["per_step_s"],
+                "soma_max_abs_difference_mV": float(
+                    jnp.max(
+                        jnp.abs(results["hybrid"][..., 0] - results["fast"][..., 0])
+                    )
+                ),
+            }
+        )
+    return {
+        "data_kind": "synthetic",
+        "backend": jax.default_backend(),
+        "steps_per_call": steps,
+        "repeats": repeats,
+        "rows": rows,
+    }
+
+
 def resolution_convergence(
     policy, metrics_fn, noise_ceilings, threshold=0.02, max_attempts=6
 ):

@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import jax
@@ -215,82 +216,72 @@ def event_synapses(sim, old, spikes, now):
     return jax.lax.fori_loop(0, sim.n_neurons, neuron_event, initial)
 
 
-def step(sim, old, current, event=False):
-    dt, n, c = sim.resolution.dt_s, sim.n_neurons, sim.resolution.n_comp
-    v = old.voltage
-    # Graded release is a voltage-dependent rate, not a fixed synaptic sign.
-    activity = jax.nn.sigmoid((v[:, 0] + 35) / 5)
-    spike_above = v[:, 0] >= sim.resolution.spike_threshold_mV
-    spikes = spike_above & ~old.spike_above
-    event_time = old.event_time + dt
-    last_release_time = old.last_release_time
-    cached_g, cached_b = old.synaptic_conductance, old.synaptic_reversal_current
+def _take(array, rows):
+    return array if rows is None else array[rows]
+
+
+def _synapse_state(sim, old, activity, spikes, event_time, event):
+    """Presynaptic STP and receptor updates for every edge."""
+    dt = sim.resolution.dt_s
     if event and sim.resolution.release_mode == "spiking":
-        receptors, resources, facilitation, last_release_time, cached_g, cached_b = (
-            event_synapses(sim, old, spikes, event_time)
+        return event_synapses(sim, old, spikes, event_time)
+    tau_rec, tau_fac, base_u = (sim.syn_params[k] for k in ("tau_rec", "tau_fac", "U"))
+    if sim.resolution.release_mode == "spiking":
+        source_events = spikes[sim.syn_pre_idx]
+        u_before = rush_larsen(old.facilitation, base_u, tau_fac, dt)
+        x_before = rush_larsen(old.resources, 1.0, tau_rec, dt)
+        facilitation = jnp.where(
+            source_events, u_before + base_u * (1 - u_before), u_before
         )
-    else:
-        tau_rec, tau_fac, base_u = (
-            sim.syn_params[k] for k in ("tau_rec", "tau_fac", "U")
-        )
-        if sim.resolution.release_mode == "spiking":
-            source_events = spikes[sim.syn_pre_idx]
-            u_before = rush_larsen(old.facilitation, base_u, tau_fac, dt)
-            x_before = rush_larsen(old.resources, 1.0, tau_rec, dt)
-            facilitation = jnp.where(
-                source_events, u_before + base_u * (1 - u_before), u_before
-            )
-            release = jnp.where(source_events, facilitation * x_before, 0.0)
-            resources = x_before - release
-            receptor_tau = jnp.asarray(
-                [
-                    r.time_constant(sim.resolution.temperature_C)
-                    for r in sim.receptor_records
-                ]
-            )
-            decayed = old.receptors * jnp.exp(-dt / receptor_tau)
-            receptors = decayed + release[:, None] * (1 - decayed)
-        else:
-            rate = 20 * activity[sim.syn_pre_idx]
-            target_u = (base_u / tau_fac + base_u * rate) / (
-                1 / tau_fac + base_u * rate
-            )
-            facilitation = rush_larsen(
-                old.facilitation, target_u, 1 / (1 / tau_fac + base_u * rate), dt
-            )
-            resource_tau = 1 / (1 / tau_rec + facilitation * rate)
-            resources = rush_larsen(
-                old.resources, resource_tau / tau_rec, resource_tau, dt
-            )
-            release = facilitation * resources * activity[sim.syn_pre_idx]
-            receptors = (
-                jnp.stack(
-                    [
-                        binding_step(
-                            old.receptors[:, i],
-                            release,
-                            0.2,
-                            r.time_constant(sim.resolution.temperature_C),
-                            dt,
-                        )
-                        for i, r in enumerate(sim.receptor_records)
-                    ],
-                    axis=1,
-                )
-                if sim.receptor_records
-                else old.receptors
-            )
-    gates = (
-        jnp.stack(
+        release = jnp.where(source_events, facilitation * x_before, 0.0)
+        resources = x_before - release
+        receptor_tau = jnp.asarray(
             [
-                r.step_gates(v, old.gates[:, :, i], dt, sim.resolution.temperature_C)
-                for i, r in enumerate(sim.channel_records)
-            ],
-            axis=2,
+                r.time_constant(sim.resolution.temperature_C)
+                for r in sim.receptor_records
+            ]
         )
-        if sim.channel_records
-        else old.gates
+        decayed = old.receptors * jnp.exp(-dt / receptor_tau)
+        receptors = decayed + release[:, None] * (1 - decayed)
+    else:
+        rate = 20 * activity[sim.syn_pre_idx]
+        target_u = (base_u / tau_fac + base_u * rate) / (1 / tau_fac + base_u * rate)
+        facilitation = rush_larsen(
+            old.facilitation, target_u, 1 / (1 / tau_fac + base_u * rate), dt
+        )
+        resource_tau = 1 / (1 / tau_rec + facilitation * rate)
+        resources = rush_larsen(old.resources, resource_tau / tau_rec, resource_tau, dt)
+        release = facilitation * resources * activity[sim.syn_pre_idx]
+        receptors = (
+            jnp.stack(
+                [
+                    binding_step(
+                        old.receptors[:, i],
+                        release,
+                        0.2,
+                        r.time_constant(sim.resolution.temperature_C),
+                        dt,
+                    )
+                    for i, r in enumerate(sim.receptor_records)
+                ],
+                axis=1,
+            )
+            if sim.receptor_records
+            else old.receptors
+        )
+    return (
+        receptors,
+        resources,
+        facilitation,
+        old.last_release_time,
+        old.synaptic_conductance,
+        old.synaptic_reversal_current,
     )
+
+
+def _modulatory(sim, old, activity, current):
+    """Peptide, slow signaling, drive and surrogate inputs; no channel kinetics."""
+    dt, n = sim.resolution.dt_s, sim.n_neurons
     released_peptides = sim.neuromod["release"] * activity[:, None]
     if sim.neuromod["mode"] == "global":
         field_target = released_peptides.sum(axis=0)
@@ -327,81 +318,11 @@ def step(sim, old, current, event=False):
         if signaling.shape[1]
         else jnp.ones(n)
     )
-    open_channels = (
-        jnp.stack(
-            [
-                r.open_probability(gates[:, :, i])
-                for i, r in enumerate(sim.channel_records)
-            ],
-            axis=2,
-        )
-        if sim.channel_records
-        else jnp.zeros((n, c, 0))
-    )
-    channel_g = (
-        sim.neuron_params["channel_density"][:, None, :]
-        * sim.neuron_params["channel_gbar"]
-        * open_channels
-        * modulation[:, None, None]
-    )
-    if event and sim.resolution.release_mode == "spiking":
-        syn_g = None
-        syn_by_receptor, syn_reversal_by_receptor = cached_g, cached_b
-    else:
-        syn_g = (
-            sim.syn_params["density"]
-            * sim.syn_params["gbar"]
-            * receptors
-            * sim.syn_params["gate"][:, None]
-        )
-        post_flat = sim.syn_post_idx * c + sim.syn_params["compartment"]
-        syn_by_receptor = jax.ops.segment_sum(
-            syn_g, post_flat, num_segments=n * c
-        ).reshape(n, c, len(sim.receptor_records))
-        syn_reversal_by_receptor = jax.ops.segment_sum(
-            syn_g * sim.syn_params["reversal"], post_flat, num_segments=n * c
-        ).reshape(n, c, len(sim.receptor_records))
-    syn_diagonal = syn_by_receptor.sum(axis=2)
-    syn_rhs = syn_reversal_by_receptor.sum(axis=2)
-    capacitance_dt = sim.neuron_params["capacitance"] / (dt * 1000)
-    diagonal = (
-        capacitance_dt
-        + sim.neuron_params["leak"]
-        + channel_g.sum(axis=2)
-        + syn_diagonal
-    )
     drive = (
         current
         + peptide_drive * sim.neuromod["effector"]
         + sim.neuron_params["transporter_current"]
     )
-    rhs = (
-        capacitance_dt * v
-        + sim.neuron_params["leak"] * sim.resolution.leak_reversal_mV
-        + (channel_g * sim.neuron_params["channel_reversal"][:, None]).sum(axis=2)
-        + syn_rhs
-    )
-    rhs = rhs.at[:, 0].add(drive)
-    voltage, residual, iterations = voltage_solve(sim, diagonal, rhs, v)
-    ca_mask = jnp.asarray(
-        [r.ion_selectivity.get("Ca", 0) > 0 for r in sim.channel_records]
-    )
-    calcium_current = jnp.maximum(
-        (
-            channel_g
-            * (sim.neuron_params["channel_reversal"][:, None] - voltage[:, :, None])
-            * ca_mask
-        ).sum(axis=(1, 2)),
-        0,
-    )
-    rec_ca = jnp.asarray(
-        [r.ion_selectivity.get("Ca", 0) > 0 for r in sim.receptor_records]
-    )
-    syn_ca_current = (
-        (syn_reversal_by_receptor - syn_by_receptor * voltage[:, :, None]) * rec_ca
-    ).sum(axis=(1, 2))
-    calcium_current += jnp.maximum(syn_ca_current, 0)
-    calcium = rush_larsen(old.calcium, 0.001 * calcium_current * 0.5, 0.5, dt)
     inputs = jnp.concatenate(
         [
             drive[:, None],
@@ -411,14 +332,91 @@ def step(sim, old, current, event=False):
         ],
         axis=1,
     )
-    surrogate_state = jnp.column_stack(
-        [
-            voltage[:, 0],
-            calcium,
-            gates.mean(axis=(1, 2, 3)) if gates.shape[2] else jnp.zeros(n),
-            signaling.mean(axis=1) if signaling.shape[1] else jnp.zeros(n),
-        ]
+    return peptide_open, peptide_field, signaling, modulation, drive, inputs
+
+
+def _channel_conductance(sim, gates, modulation, rows=None):
+    open_channels = (
+        jnp.stack(
+            [
+                r.open_probability(gates[:, :, i])
+                for i, r in enumerate(sim.channel_records)
+            ],
+            axis=2,
+        )
+        if sim.channel_records
+        else jnp.zeros(gates.shape[:2] + (0,))
     )
+    params = sim.neuron_params
+    return (
+        _take(params["channel_density"], rows)[:, None, :]
+        * params["channel_gbar"]
+        * open_channels
+        * _take(modulation, rows)[:, None, None]
+    )
+
+
+def _synaptic_conductance(sim, receptors):
+    n, c = sim.n_neurons, sim.resolution.n_comp
+    syn_g = (
+        sim.syn_params["density"]
+        * sim.syn_params["gbar"]
+        * receptors
+        * sim.syn_params["gate"][:, None]
+    )
+    post_flat = sim.syn_post_idx * c + sim.syn_params["compartment"]
+    by_receptor = jax.ops.segment_sum(syn_g, post_flat, num_segments=n * c).reshape(
+        n, c, len(sim.receptor_records)
+    )
+    reversal_by_receptor = jax.ops.segment_sum(
+        syn_g * sim.syn_params["reversal"], post_flat, num_segments=n * c
+    ).reshape(n, c, len(sim.receptor_records))
+    return by_receptor, reversal_by_receptor
+
+
+def _assemble(sim, v, channel_g, syn_by, syn_reversal, drive, rows=None):
+    capacitance = _take(sim.neuron_params["capacitance"], rows)
+    leak = _take(sim.neuron_params["leak"], rows)
+    capacitance_dt = capacitance / (sim.resolution.dt_s * 1000)
+    diagonal = capacitance_dt + leak + channel_g.sum(axis=2) + syn_by.sum(axis=2)
+    reversal = _take(sim.neuron_params["channel_reversal"], rows)
+    rhs = (
+        capacitance_dt * v
+        + leak * sim.resolution.leak_reversal_mV
+        + (channel_g * reversal[:, None]).sum(axis=2)
+        + syn_reversal.sum(axis=2)
+    )
+    return diagonal, rhs.at[:, 0].add(drive)
+
+
+def _calcium_update(sim, old_calcium, channel_g, voltage, syn_by, syn_reversal, rows):
+    ca_mask = jnp.asarray(
+        [r.ion_selectivity.get("Ca", 0) > 0 for r in sim.channel_records]
+    )
+    reversal = _take(sim.neuron_params["channel_reversal"], rows)
+    calcium_current = jnp.maximum(
+        (channel_g * (reversal[:, None] - voltage[:, :, None]) * ca_mask).sum(
+            axis=(1, 2)
+        ),
+        0,
+    )
+    rec_ca = jnp.asarray(
+        [r.ion_selectivity.get("Ca", 0) > 0 for r in sim.receptor_records]
+    )
+    syn_ca_current = ((syn_reversal - syn_by * voltage[:, :, None]) * rec_ca).sum(
+        axis=(1, 2)
+    )
+    calcium_current += jnp.maximum(syn_ca_current, 0)
+    return rush_larsen(
+        old_calcium, 0.001 * calcium_current * 0.5, 0.5, sim.resolution.dt_s
+    )
+
+
+def _surrogate_predictions(sim, old, inputs):
+    """Surrogate state update, active mask and M7-R2/M7-R4 fallback flags."""
+    dt, n = sim.resolution.dt_s, sim.n_neurons
+    predicted_state = old.surrogate_state
+    active = jnp.zeros(n, dtype=bool)
     fallback = jnp.zeros(n, dtype=bool)
     for type_id, surrogate in enumerate(sim.surrogates):
         if surrogate.family == "full":
@@ -433,12 +431,68 @@ def step(sim, old, current, event=False):
             old.surrogate_state[:, :dimensions]
             + dt * surrogate.derivative(old.surrogate_state[:, :dimensions], inputs)
         )
-        active = selected & valid
-        surrogate_state = jnp.where(active[:, None], predicted, surrogate_state)
-        voltage = voltage.at[:, 0].set(
-            jnp.where(active, predicted[:, 0], voltage[:, 0])
+        chosen = selected & valid
+        predicted_state = jnp.where(chosen[:, None], predicted, predicted_state)
+        active |= chosen
+    return predicted_state, active, fallback
+
+
+def _front(sim, old, event):
+    """Shared first half of a step: spike events and synapse updates."""
+    v = old.voltage
+    # Graded release is a voltage-dependent rate, not a fixed synaptic sign.
+    activity = jax.nn.sigmoid((v[:, 0] + 35) / 5)
+    spike_above = v[:, 0] >= sim.resolution.spike_threshold_mV
+    spikes = spike_above & ~old.spike_above
+    event_time = old.event_time + sim.resolution.dt_s
+    synapses = _synapse_state(sim, old, activity, spikes, event_time, event)
+    return activity, spike_above, event_time, synapses
+
+
+def _hybrid_step(sim, old, current, event=False):
+    """Reference: full kinetics always run; surrogate output replaces the result."""
+    dt, n = sim.resolution.dt_s, sim.n_neurons
+    v = old.voltage
+    activity, spike_above, event_time, synapses = _front(sim, old, event)
+    receptors, resources, facilitation, last_release_time, cached_g, cached_b = synapses
+    peptide_open, peptide_field, signaling, modulation, drive, inputs = _modulatory(
+        sim, old, activity, current
+    )
+    gates = (
+        jnp.stack(
+            [
+                r.step_gates(v, old.gates[:, :, i], dt, sim.resolution.temperature_C)
+                for i, r in enumerate(sim.channel_records)
+            ],
+            axis=2,
         )
-        calcium = jnp.where(active, jnp.maximum(predicted[:, 1], 0), calcium)
+        if sim.channel_records
+        else old.gates
+    )
+    channel_g = _channel_conductance(sim, gates, modulation)
+    if event and sim.resolution.release_mode == "spiking":
+        syn_by, syn_reversal = cached_g, cached_b
+    else:
+        syn_by, syn_reversal = _synaptic_conductance(sim, receptors)
+    diagonal, rhs = _assemble(sim, v, channel_g, syn_by, syn_reversal, drive)
+    voltage, residual, iterations = voltage_solve(sim, diagonal, rhs, v)
+    calcium = _calcium_update(
+        sim, old.calcium, channel_g, voltage, syn_by, syn_reversal, None
+    )
+    surrogate_state = jnp.column_stack(
+        [
+            voltage[:, 0],
+            calcium,
+            gates.mean(axis=(1, 2, 3)) if gates.shape[2] else jnp.zeros(n),
+            signaling.mean(axis=1) if signaling.shape[1] else jnp.zeros(n),
+        ]
+    )
+    predicted_state, active, fallback = _surrogate_predictions(sim, old, inputs)
+    surrogate_state = jnp.where(active[:, None], predicted_state, surrogate_state)
+    voltage = voltage.at[:, 0].set(
+        jnp.where(active, predicted_state[:, 0], voltage[:, 0])
+    )
+    calcium = jnp.where(active, jnp.maximum(predicted_state[:, 1], 0), calcium)
     new = SimState(
         voltage,
         gates,
@@ -457,6 +511,145 @@ def step(sim, old, current, event=False):
         cached_b,
     )
     return new, (voltage, calcium, signaling, residual, iterations, fallback)
+
+
+def _surrogate_step(sim, old, current):
+    """Fast branch, taken only when no eligible neuron left its envelope.
+
+    Eligible neurons take the surrogate update and skip gate stepping, channel
+    conductances, calcium kinetics and the voltage solve. The solve runs on the
+    full-kinetics set only; a gap contact to an eligible neuron enters as a
+    Dirichlet boundary at the surrogate soma voltage. Eligible non-soma
+    compartments are set to that voltage, and their gates are held until the
+    neuron next runs full kinetics.
+    """
+    plan = sim.fast_plan
+    dt, n, c = sim.resolution.dt_s, sim.n_neurons, sim.resolution.n_comp
+    v, full, surr = old.voltage, plan.full_idx, plan.surrogate_idx
+    activity, spike_above, event_time, synapses = _front(sim, old, False)
+    receptors, resources, facilitation, last_release_time = synapses[:4]
+    peptide_open, peptide_field, signaling, modulation, drive, inputs = _modulatory(
+        sim, old, activity, current
+    )
+    predicted_state, _, fallback = _surrogate_predictions(sim, old, inputs)
+    gates = old.gates
+    voltage = jnp.zeros_like(v)
+    calcium = jnp.zeros(n, dtype=v.dtype)
+    surrogate_state = predicted_state
+    residual = jnp.zeros((), dtype=v.dtype)
+    iterations = jnp.zeros((), dtype=jnp.int32)
+    if len(full):
+        if sim.channel_records:
+            stepped = jnp.stack(
+                [
+                    r.step_gates(
+                        v[full],
+                        old.gates[full][:, :, i],
+                        dt,
+                        sim.resolution.temperature_C,
+                    )
+                    for i, r in enumerate(sim.channel_records)
+                ],
+                axis=2,
+            )
+            gates = old.gates.at[full].set(stepped)
+        channel_g = _channel_conductance(sim, gates[full], modulation, full)
+        syn_by, syn_reversal = (a[full] for a in _synaptic_conductance(sim, receptors))
+        diagonal, rhs = _assemble(
+            sim, v[full], channel_g, syn_by, syn_reversal, drive[full], full
+        )
+        gap = sim.gap
+        both, (contact, local, other) = plan.gap_full_full, plan.gap_full_surrogate
+        sub = SimpleNamespace(
+            n_neurons=len(full),
+            resolution=sim.resolution,
+            gap={
+                "i": jnp.asarray(plan.local[np.asarray(gap["i"])[both]]),
+                "j": jnp.asarray(plan.local[np.asarray(gap["j"])[both]]),
+                "conductance": gap["conductance"][both],
+            },
+            partition_plan=None,
+            schwarz_layout=None,
+        )
+        boundary_g = gap["conductance"][contact].astype(diagonal.dtype)
+        diagonal = diagonal.at[local, 0].add(boundary_g)
+        rhs = rhs.at[local, 0].add(boundary_g * predicted_state[other, 0])
+        solved, solve_residual, solve_iterations = voltage_solve(
+            sub, diagonal, rhs, v[full]
+        )
+        residual = solve_residual.astype(v.dtype)
+        iterations = solve_iterations.astype(jnp.int32)
+        calcium_full = _calcium_update(
+            sim, old.calcium[full], channel_g, solved, syn_by, syn_reversal, full
+        )
+        voltage = voltage.at[full].set(solved)
+        calcium = calcium.at[full].set(calcium_full)
+        state_full = jnp.column_stack(
+            [
+                solved[:, 0],
+                calcium_full,
+                gates[full].mean(axis=(1, 2, 3))
+                if gates.shape[2]
+                else jnp.zeros(len(full)),
+                signaling[full].mean(axis=1)
+                if signaling.shape[1]
+                else jnp.zeros(len(full)),
+            ]
+        )
+        surrogate_state = surrogate_state.at[full].set(state_full)
+    soma = predicted_state[surr, 0]
+    voltage = voltage.at[surr].set(jnp.broadcast_to(soma[:, None], (len(surr), c)))
+    calcium = calcium.at[surr].set(jnp.maximum(predicted_state[surr, 1], 0))
+    new = SimState(
+        voltage,
+        gates,
+        receptors,
+        resources,
+        facilitation,
+        peptide_open,
+        peptide_field,
+        signaling,
+        calcium,
+        surrogate_state,
+        spike_above,
+        event_time,
+        last_release_time,
+        old.synaptic_conductance,
+        old.synaptic_reversal_current,
+    )
+    return new, (voltage, calcium, signaling, residual, iterations, fallback)
+
+
+def step(sim, old, current, event=False):
+    plan = sim.fast_plan
+    if plan is None or not len(plan.surrogate_idx):
+        return _hybrid_step(sim, old, current, event=event)
+    if event:
+        raise ValueError("fast surrogate execution does not support event mode")
+    # Per-neuron masking cannot skip work under static shapes, so neurons are
+    # partitioned at plan time. A runtime envelope exit (M7-R2) sends that whole
+    # step down the hybrid branch, where every neuron runs full kinetics and the
+    # exit is logged. lax.cond differentiates through the branch taken, and
+    # becomes a select (both branches run) under vmap.
+    activity = jax.nn.sigmoid((old.voltage[:, 0] + 35) / 5)
+    inputs = _modulatory(sim, old, activity, current)[-1]
+    exits = jnp.zeros((), dtype=bool)
+    for type_id, surrogate in enumerate(sim.surrogates):
+        if surrogate.family == "full":
+            continue
+        mine = (sim.neuron_params["type_index"] == type_id) & jnp.asarray(plan.eligible)
+        exits |= jnp.any(mine & ~surrogate.inside(inputs))
+
+    def hybrid(_):
+        return _hybrid_step(sim, old, current)
+
+    shapes = jax.eval_shape(hybrid, None)
+
+    def fast(_):
+        out = _surrogate_step(sim, old, current)
+        return jax.tree.map(lambda x, s: x.astype(s.dtype), out, shapes)
+
+    return jax.lax.cond(exits, hybrid, fast, None)
 
 
 def _sequential(sim, state0, currents, event=False):
@@ -578,6 +771,7 @@ def simulate(
         **sim.metadata,
         "boundary_condition": "closed_loop" if body else "open_loop",
         "mode": mode,
+        "surrogate_execution": "hybrid" if sim.fast_plan is None else "fast",
         "seed": seed,
         "dt_s": sim.resolution.dt_s,
         "parallel_fallback": parallel_fallback,

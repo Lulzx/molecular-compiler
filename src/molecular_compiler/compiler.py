@@ -116,6 +116,7 @@ class SimGraph:
     partition_plan: object | None = None
     schwarz_layout: object | None = None
     recompile: object | None = None
+    fast_plan: object | None = None
 
     @property
     def n_neurons(self):
