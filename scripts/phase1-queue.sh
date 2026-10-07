@@ -14,7 +14,9 @@ PARALLEL=${PARALLEL:-3}
 LOGS=artifacts/phase1/logs
 mkdir -p "$LOGS"
 
-while pgrep -f "molc individual-state" >/dev/null; do sleep 60; done
+# The [e] stops pgrep from matching a shell whose own command line holds
+# this pattern (e.g. another waiter); only real I0 processes match.
+while pgrep -f "molc individual-stat[e]" >/dev/null; do sleep 60; done
 
 fold() {  # variant fold
   uv run molc phase1-fold --split leave_class_out --fold "$2" --variant "$1" \
