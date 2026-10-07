@@ -32,9 +32,11 @@ Declared approximations, all echoed in the report:
   with gain sensory_gain_pA. Velocity, angular velocity and pumping are
   carried but have zero default gain. Illustrative, not an anatomical map.
 - L3 uses `ProprioceptiveLoop` (default illustrative territories).
-- L4 needs the monoamine and insulin pathway of c(t). The simulator has no
-  input for modulator targets, so L4 is `unavailable` unless a stand-in
-  `l4` mapping from modulator targets to tonic current is supplied.
+- L4 feeds the animal's recorded pumping back into the modulator
+  concentrations c(t) through `simulate`'s BodyOutput path. The map from
+  pumping to each modulator (`l4["gain"]`, one row per compiled
+  concentration) has no default, so L4 is `unavailable` until one is given.
+  The baseline defaults to the compiled concentrations.
 - L5 is `unavailable` unless a body factory is supplied.
 - The emulation is the population model; no per-animal parameter enters it,
   so rungs other than L2 and L4 are emulated once and shared by all animals.
@@ -215,25 +217,6 @@ def replay_series(animal, scales, n_samples):
         [animal.channels[c][:n_samples] / scales[c] for c in CHANNELS], axis=1
     )
     return np.nan_to_num(series)
-
-
-class _ModulatedBody:
-    """L4 stand-in: sensory current plus a linear map of modulator-target deviations."""
-
-    rung = "L4"
-
-    def __init__(self, loop, baseline, to_current_pA):
-        self.loop, self.baseline = loop, np.asarray(baseline, float)
-        self.to_current = np.asarray(to_current_pA, float)
-
-    def _combine(self, out):
-        return out.sensory + self.to_current @ (out.modulator_targets - self.baseline)
-
-    def reset(self, state0):
-        return self._combine(self.loop.reset(state0))
-
-    def step(self, motor, dt_s):
-        return self._combine(self.loop.step(motor, dt_s))
 
 
 def _subsample(calcium, offset, k):
@@ -486,10 +469,12 @@ class MinimumBody:
             if rung == "L4":
                 if self.l4 is None:
                     raise BodyNotConfigured(
-                        "L4 needs the monoamine/insulin c(t) pathway; the simulator "
-                        "has no input for modulator targets and no stand-in `l4` "
-                        "mapping was supplied"
+                        "L4 needs a pumping-to-modulator map (`l4['gain']`); "
+                        "there is no default"
                     )
+                baseline = self.l4.get("baseline")
+                if baseline is None:
+                    baseline = np.asarray(self.sim.neuromod["concentrations"])
                 pump = np.nan_to_num(
                     animal.channels["pumping"] / self.scales["pumping"]
                 )
@@ -501,12 +486,9 @@ class MinimumBody:
                     InteroceptiveLoop,
                     interoception_fn=intero,
                     gain=self.l4["gain"],
-                    baseline=self.l4["baseline"],
+                    baseline=baseline,
                 )
-                body = _ModulatedBody(
-                    loop, self.l4["baseline"], self.l4["to_current_pA"]
-                )
-                return self._closed_loop(body, n)
+                return self._closed_loop(loop, n)
             if rung == "L5":
                 if self.l5 is None:
                     raise BodyNotConfigured("L5 external body not configured")
@@ -739,8 +721,9 @@ DECLARED_APPROXIMATIONS = [
     ),
     "L3/L4 use the reduced 2D body with its illustrative territories and parameters.",
     (
-        "L4: the simulator has no modulator-target input; L4 is unavailable unless a "
-        "stand-in linear map from modulator targets to tonic current is supplied."
+        "L4: recorded pumping drives the modulator concentrations c(t) through a "
+        "supplied linear map (no default); c relaxes toward the targets with "
+        "simulate's modulator_tau_s."
     ),
     (
         "dF/F0 uses F0 = 10th percentile over [0, H] for recordings; the emulation is "

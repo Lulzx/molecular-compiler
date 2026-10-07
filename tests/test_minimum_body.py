@@ -184,12 +184,9 @@ def test_I2_missing_latent_makes_that_animal_not_evaluable(sim, recordings):
     assert r1["records"][0]["part_ii"]["status"] == "evaluated"
 
 
-def test_I2_L3_runs_on_reduced_body_and_L4_standin(sim, recordings):
-    l4 = {
-        "gain": np.array([[1.0], [0.5]]),  # monoamine, insulin <- pumping
-        "baseline": np.zeros(2),
-        "to_current_pA": np.array([[1.0, 0.0]] * 4),
-    }
+def test_I2_L3_and_L4_run_with_modulators_driven_by_pumping(sim, recordings):
+    k = np.asarray(sim.neuromod["concentrations"]).shape[0]
+    l4 = {"gain": np.ones((k, 1))}  # every modulator <- pumping
     report = run(
         sim, recordings, horizons=(0.008,), rungs=("L0", "L3", "L4", "L5"), l4=l4
     )
@@ -252,3 +249,18 @@ def test_I2_cli_command_is_wired(capsys, monkeypatch):
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     assert "--trained" in out and "--recordings" in out and "--output" in out
+
+
+def test_I2_L4_pumping_changes_emulation_through_modulators(recordings):
+    from molecular_compiler.compiler import ModulatoryState
+
+    graph, rules, kinetics = synthetic_system()
+    modulated = compile(graph, rules, kinetics, state=ModulatoryState((0.0, 0.0)))
+    l4 = {"gain": np.full((2, 1), 50.0)}
+    body = MB.MinimumBody(modulated, NAMES, recordings, fluorescence, l4=l4, **OPTIONS)
+    a = body.animals[0]
+    proprioceptive = body.emulate("L3", a, 8, None)
+    interoceptive = body.emulate("L4", a, 8, None)
+    assert np.all(np.isfinite(interoceptive))
+    # Slow signaling relaxes over 60 s, so over 8 ms the effect is tiny but nonzero.
+    assert np.max(np.abs(proprioceptive - interoceptive)) > 0
