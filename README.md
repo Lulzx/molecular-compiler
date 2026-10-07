@@ -1,6 +1,6 @@
 # molecular-compiler
 
-A Python/JAX reference implementation of [spec.md](spec.md), revision 9.
+A Python/JAX reference implementation of [spec.md](spec.md), revision 10.
 It prepares registered connectome and molecular data, compiles compositional
 molecular rules into a simulation, and differentiates through simulation and
 calcium observation. It includes held-out evaluation, feasibility analyses,
@@ -15,6 +15,9 @@ progress: spec Section 10.3, procedure and run state in
 [docs/phase1.md](docs/phase1.md). See
 [implementation status](docs/implementation.md) for the requirement map,
 numerical evidence, and remaining delivery gates.
+Track I (spec Section 10.4) studies the durable state that makes one worm
+differ from another, and the smallest virtual body that sustains it. Its
+first stage is in [docs/individual-state.md](docs/individual-state.md).
 
 ## Run
 
@@ -54,6 +57,13 @@ Phase 1 (full compiled model; see [docs/phase1.md](docs/phase1.md)):
 ```sh
 uv run molc phase1-fold --split leave_class_out --fold 0 --steps 30 --batch 4
 uv run molc phase1-report   # after all five folds are written
+```
+
+Track I, Stage I0 (per-animal latent on the Randi traces; see
+[docs/individual-state.md](docs/individual-state.md)):
+
+```sh
+uv run molc individual-state
 ```
 
 ESM-2 weights are loaded only when `esm2_embedder` is explicitly invoked.
