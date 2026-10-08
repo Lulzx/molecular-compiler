@@ -29,7 +29,7 @@ uv run molc individual-state   # writes artifacts/individual/individual-state.js
 
 It needs the ingested traces (`molc traces-ingest`; see
 [phase1.md](phase1.md)). The full nested selection takes about 40 minutes on
-a 12-core CPU. Each run also writes per-trial squared errors to
+a 12-core CPU when the machine is otherwise idle. Each run also writes per-trial squared errors to
 `individual-errors.npz` so the gates can be recomputed without refitting.
 
 ## What it does
@@ -102,9 +102,31 @@ reported alongside.
   dimensions recover some of the shrinkage, so the 1-SE rule's r\* is an
   upper bound on the knee, not the knee itself.
 
-## Results
+## Results (2026-10-07)
 
-Pending: the first run is in progress.
+The numerical report is restricted and stays in `artifacts/individual/`. The
+outcomes are recorded in spec §10.4 (Revision 13):
+
+- **I0-1 fails.** No factor rank beats the population model or the swap
+  control. Trial noise leaves room for about a third of the population
+  model's error to be explained, and the latent explains essentially none of
+  it.
+- **I0-2 fails.** The scalar gain beats every factor model. The gain is small
+  but reliably positive, the same under both splits, and not predicted by
+  recording covariates. It cannot be separated from indicator expression, so
+  it does not count as biological evidence.
+- **I0-3 is inconclusive.** There is no factor state to test for persistence.
+- **Grid edge.** Inner selection always chose the largest κ and usually the
+  largest ridge values. More shrinkage moves factor gains toward zero, so the
+  conclusion holds.
+
+What this does and does not show: about 14% of pairs repeat within an animal.
+A state that is specific to individual pairs, and not shared through a basis,
+would be invisible to this design. The result is "not detected", not
+"absent". The next candidate source is spontaneous activity in the Atanas et
+al. recordings, which needs its own pre-registered stage.
+
+The run took about 40 minutes.
 
 ## Stage I2 command (`molc track-i2`)
 
